@@ -1,7 +1,1 @@
-__pycache__/
-*.pyc
-logs/
-*.log
-reports/
-scans/processed/
-*.zip
+backups/

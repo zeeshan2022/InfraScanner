@@ -133,25 +133,26 @@ class Config:
         return errs
 
     # ------------------------------------------------------------- backups
-    EMERGENCY_BACKUP_DIR = Path("/tmp/InfraScanner")
+    SECONDARY_BACKUP_DIR = Path("/opt/InfraScanner-bkp")
 
     def backup(self, dest_dir: Path | None = None) -> Path:
         """Save a timestamped config backup into the repository backups/
-        folder AND an emergency copy in /tmp/InfraScanner. Only the last 20
-        backups are kept (retention.config_backups)."""
+        folder AND a durable secondary copy in /opt/InfraScanner-bkp
+        (never /tmp - temporary folders may be cleaned by the OS).
+        Only the last N backups are kept (retention.config_backups)."""
         dest_dir = dest_dir or (ROOT / "backups")
         dest_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         dest = dest_dir / f"config_{stamp}.yaml"
         shutil.copy2(self.path, dest)
-        # emergency copy survives accidental deletion of the repo folder
+        # secondary copy survives accidental deletion of the repo folder
         try:
-            emerg = self.EMERGENCY_BACKUP_DIR / "backups"
-            emerg.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(dest, emerg / dest.name)
-            self._prune_backups(emerg)
-        except OSError:
-            pass
+            self.SECONDARY_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(dest, self.SECONDARY_BACKUP_DIR / dest.name)
+            self._prune_backups(self.SECONDARY_BACKUP_DIR)
+        except OSError as exc:
+            log.warning("Secondary backup to %s failed: %s",
+                        self.SECONDARY_BACKUP_DIR, exc)
         self._prune_backups(dest_dir)
         return dest
 
@@ -168,6 +169,13 @@ class Config:
     def list_backups(self) -> list[Path]:
         """All config backups in the repository backups/ folder, newest first."""
         bdir = ROOT / "backups"
+        files = sorted(bdir.glob("config_*.yaml"),
+                       key=lambda p: p.stat().st_mtime, reverse=True) if bdir.exists() else []
+        return files
+
+    def list_secondary_backups(self) -> list[Path]:
+        """Config backups living in /opt/InfraScanner-bkp, newest first."""
+        bdir = self.SECONDARY_BACKUP_DIR
         files = sorted(bdir.glob("config_*.yaml"),
                        key=lambda p: p.stat().st_mtime, reverse=True) if bdir.exists() else []
         return files

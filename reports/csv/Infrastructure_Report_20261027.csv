@@ -1,0 +1,7 @@
+hostname,ip,vlan,os,port,protocol,state,service,product,version,tunnel,databases,http_title,ssl_expired,smbv1
+web01,192.168.1.20,DMZ,Linux 5.x,443,tcp,open,https,nginx,1.24.0,ssl,MSSQL:1433,Company Portal,False,False
+web01,192.168.1.20,DMZ,Linux 5.x,1433,tcp,open,ms-sql-s,,,,MSSQL:1433,Company Portal,False,False
+web01,192.168.1.20,DMZ,Linux 5.x,3389,tcp,open,ms-wbt-server,,,,MSSQL:1433,Company Portal,False,False
+,192.168.1.55,DMZ,Unknown,23,tcp,open,telnet,,,,,,False,False
+DC01,192.168.4.10,MGMT,Windows Server 2022,445,tcp,open,microsoft-ds,,,,,,True,True
+DC01,192.168.4.10,MGMT,Windows Server 2022,3389,tcp,open,ms-wbt-server,,,,,,True,True

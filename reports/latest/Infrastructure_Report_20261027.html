@@ -1,0 +1,32 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Infrastructure Report - My Company</title>
+<style>
+body{font-family:Segoe UI,Arial,sans-serif;margin:2em;color:#222}
+h1{border-bottom:3px solid #2c3e50} table{border-collapse:collapse;width:100%}
+td,th{border:1px solid #ccc;padding:4px 8px;font-size:13px} th{background:#2c3e50;color:#fff;text-align:left}
+tr:nth-child(even){background:#f4f6f7} .badge{padding:2px 8px;border-radius:4px;color:#fff}
+.footer{margin-top:2em;font-size:12px;color:#777}
+</style></head><body>
+<h1>My Company - Infrastructure Scan Report</h1>
+<p><b>Classification:</b> Internal &nbsp;|&nbsp;
+<b>Generated:</b> 2026-10-27 08:17:03 &nbsp;|&nbsp; <b>Scan time:</b> 2026-10-27T10:00:00
+&nbsp;|&nbsp; <b>Profile:</b> standard &nbsp;|&nbsp; <b>Duration:</b> 00h 43m 18s</p>
+<h2>Executive Summary</h2>
+<ul>
+<li>Active hosts: <b>3</b></li>
+<li>Open ports: <b>6</b></li>
+<li>Findings: CRITICAL <b>2</b>, HIGH <b>2</b>,
+MEDIUM <b>2</b>, LOW <b>1</b>, INFO <b>1</b></li>
+</ul>
+<h2>Asset Changes vs Previous Scan</h2><p>New hosts: 0 | Removed: 0 | New ports: 0 | Closed ports: 2 | OS changed: 0 | Hostname changed: 0</p>
+<h2>Top Ports</h2><ul><li>3389 - 2 hosts</li><li>445 - 1 hosts</li><li>443 - 1 hosts</li><li>1433 - 1 hosts</li><li>23 - 1 hosts</li></ul>
+<h2>Hosts per VLAN</h2><ul><li>DMZ - 2</li><li>MGMT - 1</li></ul>
+<h2>OS Distribution</h2><ul><li>Windows - 1</li><li>Linux - 1</li><li>Unknown - 1</li></ul>
+<h2>Security Findings (severity ranked)</h2>
+<table><tr><th>Severity</th><th>Finding</th><th>Host</th><th>Detail</th></tr><tr><td><span style='color:#c0392b;font-weight:bold'>CRITICAL</span></td><td>RDP exposed in DMZ</td><td>192.168.1.20</td><td>TCP 3389 open on DMZ segment</td></tr><tr><td><span style='color:#c0392b;font-weight:bold'>CRITICAL</span></td><td>Database exposed in DMZ</td><td>192.168.1.20</td><td>MSSQL on port 1433</td></tr><tr><td><span style='color:#e67e22;font-weight:bold'>HIGH</span></td><td>SMBv1 detected</td><td>192.168.4.10</td><td>Legacy SMB protocol enabled</td></tr><tr><td><span style='color:#e67e22;font-weight:bold'>HIGH</span></td><td>Insecure protocol: Telnet</td><td>192.168.1.55</td><td>TCP 23 open</td></tr><tr><td><span style='color:#f1c40f;font-weight:bold'>MEDIUM</span></td><td>RDP exposed</td><td>192.168.4.10</td><td>TCP 3389 open</td></tr><tr><td><span style='color:#f1c40f;font-weight:bold'>MEDIUM</span></td><td>Expired SSL certificate</td><td>192.168.4.10</td><td>Cert for CN=DC01 expired</td></tr><tr><td><span style='color:#3498db;font-weight:bold'>LOW</span></td><td>HTTP/HTTPS service</td><td>192.168.1.20</td><td>443</td></tr><tr><td><span style='color:#95a5a6;font-weight:bold'>INFO</span></td><td>Unknown device</td><td>192.168.1.55</td><td>No hostname or OS identified</td></tr></table>
+<h2>Host Inventory (3)</h2>
+<table><tr><th>Hostname</th><th>IP</th><th>VLAN</th><th>OS</th><th>Open</th>
+<th>Ports / Services</th><th>Notes</th></tr><tr><td>web01</td><td>192.168.1.20</td><td>DMZ</td><td>Linux 5.x</td><td>3</td><td>443/tcp https nginx 1.24.0<br>1433/tcp ms-sql-s <br>3389/tcp ms-wbt-server </td><td>DB: MSSQL:1433</td></tr><tr><td>-</td><td>192.168.1.55</td><td>DMZ</td><td>Unknown</td><td>1</td><td>23/tcp telnet </td><td>-</td></tr><tr><td>DC01</td><td>192.168.4.10</td><td>MGMT</td><td>Windows Server 2022</td><td>2</td><td>445/tcp microsoft-ds <br>3389/tcp ms-wbt-server </td><td>SSL EXPIRED; SMBv1!</td></tr></table>
+<div class="footer">InfraScanner v - Copyright (c) ZXSPRD.COM - GNU GPL v3 -
+Report author: InfraScanner</div>
+</body></html>

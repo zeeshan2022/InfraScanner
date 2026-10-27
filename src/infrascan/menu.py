@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -28,7 +29,7 @@ from .mailer import send_reports, build_summary, send_test as email_test, EmailE
 from .notifier import notify_event, send_test as teams_test
 from .reporter import generate_reports, load_latest_inventory, package_zip, compute_stats
 from .scanner import (ScanError, discover_all, run_full_scan, scan_single_target,
-                      load_checkpoint, clear_checkpoint)
+                      load_checkpoint, clear_checkpoint, check_config_version)
 from .enumerator import enumerate_services, evaluate_findings, severity_counts
 from .scheduler import PRESETS, add_schedule, list_schedules, remove_schedule, set_enabled
 from .utils import human_duration, is_root
@@ -342,13 +343,17 @@ Configuration
         elif c == "12":
             print("Export bundle written:", export_config_bundle(cfg))
         elif c == "13":
-            imp = input("Path to bundle (.zip) or config yaml: ").strip()
-            if imp:
-                try:
-                    import_config_bundle(cfg, Path(imp))
-                    print("Config imported and validated; previous live config auto-backed up.")
-                except Exception as exc:
-                    print(f"Import failed: {exc}")
+            try:
+                imp = input("Import from listed bundles? [Y/n]: ").strip().lower()
+                if imp != "n":
+                    import_config_bundle(cfg)  # numbered wizard, no path entry
+                else:
+                    pth = input("Path to bundle (.zip) or config yaml: ").strip()
+                    if pth:
+                        import_config_bundle(cfg, Path(pth))
+                print("Config imported and validated; previous live config auto-backed up.")
+            except Exception as exc:
+                print(f"Import failed: {exc}")
         elif c == "14":
             cur = bool(cfg.get("logging.verbose_debug", False))
             ans = input(f"Enable verbose debug mode? current={'ON' if cur else 'OFF'} [y/N]: ").strip().lower()
@@ -525,7 +530,7 @@ def cfg_retention_wizard(cfg):
     ask_num("report_days", "Report retention days", 90)
     ask_num("scan_days", "Scan data retention days", 90)
     ask_num("monthly_keep", "Keep monthly archives (count)", 12)
-    ask_num("config_backups", "Config backups to keep (repo + /tmp emergency)", 20)
+    ask_num("config_backups", "Config backups to keep (per location: repo + /opt backup dir)", 20)
     lg = input("Log max size MB [5]: ").strip() or "5"
     try:
         cfg.set("logging.max_bytes", int(float(lg) * 1_048_576))
@@ -543,34 +548,156 @@ def cfg_retention_wizard(cfg):
 
 # ------------------------------------------------------- backup manager / wizards
 def menu_backup_manager(cfg):
-    """Save / list / restore configuration backups.
-    Every save goes to <repo>/backups AND an emergency copy in /tmp/InfraScanner.
-    The last 20 backups are retained automatically."""
+    """Backup Manager sub-menu.
+
+    1. Create Backup   (saved to <repo>/backups AND /opt/InfraScanner-bkp)
+    2. List Backups    (repository + external location)
+    3. Restore Backup  (numbered selection - no manual path entry required;
+                        YAML validated, safety backup taken before overwrite)
+    4. Delete Backup
+    5. Open Backup Folder
+    """
     while True:
-        backups = cfg.list_backups()
-        print(f"\nConfiguration Backup Manager   (keep last "
-              f"{cfg.get('retention.config_backups', 20)}, emergency dir: "
-              f"{cfg.EMERGENCY_BACKUP_DIR})")
-        for i, b in enumerate(backups[:20], 1):
-            print(f"  {i:>2}. {b.name:<38} {b.stat().st_size // 1024} KB")
-        if not backups:
-            print("  (no backups yet)")
-        c = input("s=save new backup / <num>=restore / 0=back: ").strip().lower()
+        repo_bk = cfg.list_backups()
+        ext_bk = cfg.list_secondary_backups()
+        print(f"""
+╔══════════════════════════════════════════════════════╗
+║                  Configuration Backup                ║
+╚══════════════════════════════════════════════════════╝
+  Source : {cfg.path}
+  Repo   : {cfg.root / 'backups'}  ({len(repo_bk)} backups)
+  Ext    : {cfg.SECONDARY_BACKUP_DIR}  ({len(ext_bk)} backups)
+  Retain : last {cfg.get('retention.config_backups', 20)} per location
+
+  1. Create Backup
+  2. List Backups
+  3. Restore Backup
+  4. Delete Backup
+  5. Open Backup Folder
+  0. Back""")
+        c = input("> ").strip()
         if c in ("", "0"):
             return _pause()
-        if c == "s":
+        elif c == "1":
             dest = cfg.backup()
-            print("Backup saved:", dest)
-            print("Emergency copy:", cfg.EMERGENCY_BACKUP_DIR / "backups" / dest.name)
-        elif c.isdigit() and 1 <= int(c) <= len(backups):
-            if input(f"Restore {backups[int(c)-1].name}? Current config will be "
-                     f"auto-backed up first. [y/N]: ").lower() == "y":
-                cfg.restore_from(backups[int(c) - 1])
-                print("Config restored.")
+            ext = cfg.SECONDARY_BACKUP_DIR / dest.name
+            print("\n================================================")
+            print("Configuration Backup")
+            print("\nCreated:")
+            print(f"  \u2713 {dest}")
+            if ext.exists():
+                print(f"  \u2713 {ext}")
+            else:
+                print(f"  \u26a0 {ext} (secondary copy failed - check permissions)")
+            print("\nStatus:\nSUCCESS")
+            print("================================================")
+        elif c == "2":
+            _show_backup_list(repo_bk, ext_bk)
+        elif c == "3":
+            all_bk = _pick_backup(repo_bk, ext_bk)
+            if all_bk is None:
+                continue
+            src = all_bk
+            print("\n================================================")
+            print("Configuration Restore")
+            print(f"\nSelected:\n{src.name}")
+            # validate YAML first
+            import yaml as _yaml
+            try:
+                data = _yaml.safe_load(src.read_text(encoding="utf-8")) or {}
+                if not isinstance(data, dict) or not data.get("networks"):
+                    raise ValueError("missing 'networks' section")
+                print("\nValidation:\n\u2713 YAML Valid")
+            except Exception as exc:
+                print(f"\nValidation:\n\u2717 INVALID\n\nStatus:\nFAILED\n\nReason:\n{exc}")
+                print("================================================")
+                continue
+            if input("\nProceed with restore? [y/N]: ").strip().lower() != "y":
+                print("Cancelled."); continue
+            try:
+                safety = cfg.backup()
+                print(f"Safety Backup:\n\u2713 Created ({safety.name})")
+                cfg.restore_from(src)
+                print("Restore:\n\u2713 SUCCESS")
+            except Exception as exc:
+                print(f"Restore:\n\u2717 FAILED\n\nStatus:\nFAILED\n\nReason:\n{exc}")
+            print("================================================")
+        elif c == "4":
+            sel = _pick_backup(repo_bk, ext_bk)
+            if sel is None:
+                continue
+            if input(f"Delete {sel}? [y/N]: ").strip().lower() == "y":
+                try:
+                    sel.unlink()
+                    # also remove same-named twin in the other location
+                    twin = (cfg.SECONDARY_BACKUP_DIR if sel.parent != cfg.SECONDARY_BACKUP_DIR
+                            else cfg.root / "backups") / sel.name
+                    if twin.exists():
+                        twin.unlink()
+                    print("Deleted.")
+                except OSError as exc:
+                    print(f"Delete failed: {exc}")
+        elif c == "5":
+            bdir = cfg.root / "backups"
+            bdir.mkdir(parents=True, exist_ok=True)
+            for opener in (("xdg-open",), ("gio", "open"), ("nautilus",)):
+                try:
+                    subprocess.Popen(list(opener) + [str(bdir)],
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+                    print(f"Opened {bdir}")
+                    break
+                except (FileNotFoundError, OSError):
+                    continue
+            else:
+                print(f"No GUI file manager found. Folder: {bdir}")
+
+
+def _backup_rows(repo_bk, ext_bk):
+    rows = []
+    for b in repo_bk[:20]:
+        rows.append((b, "Repo"))
+    seen = {r[0].name for r in rows}
+    for b in ext_bk[:20]:
+        if b.name not in seen:
+            rows.append((b, "Ext"))
+    return rows
+
+
+def _show_backup_list(repo_bk, ext_bk):
+    print("\n================================================")
+    print("Available Configuration Backups")
+    print("\nRepository Backups")
+    print("----------------------")
+    if repo_bk:
+        for i, b in enumerate(repo_bk[:20], 1):
+            print(f"{i:>3}. {b.name}")
+    else:
+        print("  (none)")
+    print("\nExternal Backups (/opt/InfraScanner-bkp)")
+    print("----------------------")
+    if ext_bk:
+        base = len(repo_bk[:20])
+        for i, b in enumerate(ext_bk[:20], 1):
+            print(f"{base + i:>3}. {b}")
+    else:
+        print("  (none)")
+    print("================================================")
+
+
+def _pick_backup(repo_bk, ext_bk):
+    """Numbered picker across both locations. Returns Path or None."""
+    _show_backup_list(repo_bk, ext_bk)
+    rows = _backup_rows(repo_bk, ext_bk)
+    n = input(f"Select backup number (1-{len(rows)}) or 0 to cancel: ").strip()
+    if not n.isdigit() or not (1 <= int(n) <= len(rows)):
+        return None
+    return rows[int(n) - 1][0]
 
 
 def export_config_bundle(cfg) -> Path:
-    """Wizard: portable ZIP with config.yaml + defaults + recent backups."""
+    """Wizard: portable ZIP with config.yaml + defaults + recent backups.
+    The bundle is stored in BOTH <repo>/backups and /opt/InfraScanner-bkp."""
     import zipfile as _zf
     out_dir = cfg.root / "backups"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -583,13 +710,27 @@ def export_config_bundle(cfg) -> Path:
             zf.write(DEFAULTS_FILE, "config/config.defaults.yaml")
         for b in cfg.list_backups()[:20]:
             zf.write(b, f"backups/{b.name}")
-    log.info("Config bundle exported: %s", bundle)
+    # durable secondary copy of the bundle
+    try:
+        cfg.SECONDARY_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        ext_bundle = cfg.SECONDARY_BACKUP_DIR / bundle.name
+        shutil.copy2(bundle, ext_bundle)
+        log.info("Config bundle exported: %s (+ %s)", bundle, ext_bundle)
+    except OSError as exc:
+        log.warning("Secondary bundle copy failed: %s", exc)
+        log.info("Config bundle exported: %s", bundle)
     return bundle
 
 
-def import_config_bundle(cfg, src: Path) -> None:
-    """Wizard: import a bundle ZIP (or plain config yaml) with validation."""
+def import_config_bundle(cfg, src: str | Path | None = None) -> None:
+    """Wizard: import a bundle ZIP (or plain config yaml) with validation.
+    When src is None, existing backup bundles are listed for numbered
+    selection - no mandatory manual path entry."""
     import zipfile as _zf
+    if src is None:
+        src = _pick_bundle(cfg)
+        if src is None:
+            return
     src = Path(src)
     if not src.exists():
         raise ConfigError(f"File not found: {src}")
@@ -617,6 +758,29 @@ def import_config_bundle(cfg, src: Path) -> None:
         raise ConfigError("Imported config has no networks - refusing to import")
     cfg.restore_from(tmp_target)
     log.info("Config imported from %s", src)
+
+
+def _pick_bundle(cfg):
+    """List existing export bundles in both locations for numbered selection."""
+    bundles = sorted((cfg.root / "backups").glob("infrascan_config_bundle_*.zip"),
+                     key=lambda p: p.stat().st_mtime, reverse=True)
+    ext = sorted(cfg.SECONDARY_BACKUP_DIR.glob("infrascan_config_bundle_*.zip"),
+                 key=lambda p: p.stat().st_mtime, reverse=True) \
+        if cfg.SECONDARY_BACKUP_DIR.exists() else []
+    seen = {b.name for b in bundles}
+    rows = [(b, "Repo") for b in bundles[:20]]
+    rows += [(b, "Ext") for b in ext[:20] if b.name not in seen]
+    if not rows:
+        print("No export bundles found in backups/ or "
+              f"{cfg.SECONDARY_BACKUP_DIR}.")
+        return None
+    print("\nAvailable Configuration Bundles")
+    for i, (b, loc) in enumerate(rows, 1):
+        print(f"  {i:>2}. [{loc}] {b.name}")
+    n = input(f"Select bundle number (1-{len(rows)}) or 0 to cancel: ").strip()
+    if not n.isdigit() or not (1 <= int(n) <= len(rows)):
+        return None
+    return rows[int(n) - 1][0]
 
 
 # ---------------------------------------------------------------- schedule
@@ -719,26 +883,29 @@ All parameters live in config/config.yaml.""")
 
 # ---------------------------------------------------------------- diagnostics
 def act_diagnostics(cfg):
-    """Show recently executed nmap commands and the last log entries."""
+    """Menu 19: Diagnostics - executed nmap commands, log tail, environment."""
     import json as _json
     from .config_manager import ROOT
     print("\nDiagnostics")
-    # 1. executed nmap commands
+    # 1. executed nmap commands (last 20, with result / runtime / rc / stderr)
     lcp = cfg.dir("logs_dir") / "last_commands.log"
     if not lcp.exists():
         lcp = ROOT / "logs" / "last_commands.log"
-    print("\n--- Executed Nmap commands (latest first) ---------------")
+    print("\n--- Last 20 Nmap Commands -------------------------------------")
     if lcp.exists():
         lines = lcp.read_text(errors="replace").splitlines()[-20:]
         for line in reversed(lines):
             try:
                 rec = _json.loads(line)
                 rc = rec.get("rc")
-                mark = "\u2714" if rc == 0 else f"\u2716 rc={rc}"
-                print(f"[{rec.get('time','')}] {mark} ({rec.get('duration_sec',0)}s)")
+                mark = "\u2714 Success" if rc == 0 else f"\u2716 Failed rc={rc}"
+                print(f"{rec.get('time','')}   {mark}   "
+                      f"runtime {rec.get('duration_sec', 0)}s")
                 print(f"    {rec.get('cmd','')}")
                 if rec.get("stderr_tail"):
-                    print(f"    stderr: {rec['stderr_tail'][:200]}")
+                    first_err = next((l for l in rec["stderr_tail"].splitlines()
+                                      if l.strip()), "")
+                    print(f"    STDERR: {first_err[:200]}")
             except ValueError:
                 print("   ", line)
     else:
@@ -756,7 +923,64 @@ def act_diagnostics(cfg):
     # 3. current environment summary
     print("\n--- Environment -------------------------------------------")
     for comp, status, detail in health_check(cfg):
-        print(f"  [{status:<4}] {comp:<15} {detail}")
+        print(f"  [{STATUS_ICONS.get(status, ' ')} {status:<4}] {comp:<15} {detail}")
+    c = input("\nr = show RAW SCAN ARTIFACT BROWSER / Enter back: ").strip().lower()
+    if c == "r":
+        act_raw_browser(cfg)
+
+
+# ------------------------------------------------------------- raw scan browser
+def act_raw_browser(cfg):
+    """Raw Scan Artifact Browser: discovery XML/GNMAP, per-host XML/GNMAP,
+    and the nmap command history. View / export (copy to reports/latest) /
+    open folder."""
+    raw = cfg.dir("scans_dir") / "raw"
+    arts = []
+    if raw.exists():
+        arts = sorted(raw.iterdir(), key=lambda p: p.stat().st_mtime,
+                      reverse=True)
+        arts = [a for a in arts if a.is_file()]
+    print("\n================================================")
+    print("Raw Scan Browser")
+    print(f"Folder: {raw}")
+    print("================================================")
+    if not arts:
+        print("  (no raw artifacts found - run a scan first)")
+        return _pause()
+    for i, a in enumerate(arts[:40], 1):
+        kb = a.stat().st_size // 1024
+        kind = ("Discovery XML" if a.name.startswith("discovery_") and a.suffix == ".xml"
+                else "Discovery GNMAP" if a.name.startswith("discovery_") and a.name.endswith(".gnmap")
+                else "Host XML" if a.suffix == ".xml"
+                else "Host GNMAP" if a.name.endswith(".gnmap")
+                else "Checkpoint/Meta" if a.suffix == ".json"
+                else "Other")
+        print(f"  {i:>2}. [{kind:<15}] {a.name:<58} {kb} KB")
+    c = input("v<num>=view  x<num>=export copy  o=open folder  Enter=back: ").strip().lower()
+    if c == "o":
+        for opener in (("xdg-open",), ("gio", "open"), ("nautilus",)):
+            try:
+                subprocess.Popen(list(opener) + [str(raw)],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+                print(f"Opened {raw}")
+                break
+            except (FileNotFoundError, OSError):
+                continue
+        else:
+            print(f"No GUI file manager found. Folder: {raw}")
+    elif c.startswith("v") and c[1:].isdigit() and int(c[1:]) <= len(arts):
+        p = arts[int(c) - 1]
+        text = p.read_text(errors="replace")
+        print(text[:4000] + ("\n... (truncated - full file: %s)" % p
+                             if len(text) > 4000 else ""))
+    elif c.startswith("x") and c[1:].isdigit() and int(c[1:]) <= len(arts):
+        p = arts[int(c) - 1]
+        dest = cfg.dir("reports_dir") / "latest"
+        dest.mkdir(parents=True, exist_ok=True)
+        out = dest / p.name
+        shutil.copy2(p, out)
+        print(f"Exported to {out}")
     _pause()
 
 
@@ -856,7 +1080,8 @@ MENU_ITEMS = [
     ("17", "Send Historical Reports", act_send_historical),
     ("18", "Report Browser", act_report_browser),
     ("19", "Diagnostics", act_diagnostics),
-    ("20", "About", act_about),
+    ("20", "Raw Scan Browser", act_raw_browser),
+    ("21", "About", act_about),
 ]
 
 STATUS_ICONS = {"OK": "\u2714", "WARN": "\u26a0", "FAIL": "\u2716"}
@@ -873,36 +1098,47 @@ def _env_summary_lines(cfg):
     inv = load_latest_inventory(cfg)
     last = inv.get("scan_time", "never") if inv else "never"
     live = len(inv.get("hosts", [])) if inv else 0
+    ports = sum(len(h.get("ports", [])) for h in inv.get("hosts", [])) if inv else 0
     ck = load_checkpoint(cfg)
     resume = f"  [RESUMABLE SCAN: {len(ck.get('hosts', []))} done]" if ck else ""
-    priv = "root" if is_root() else "non-root (SYN/OS degraded)"
+    priv = "Root" if is_root() else "non-root (SYN/OS degraded)"
     return [
-        f" Networks : {len(nets)} ({', '.join(n['name'] for n in nets[:4])}{'...' if len(nets) > 4 else ''})",
-        f" Profile  : {prof}          Privileges : {priv}",
-        f" SMTP     : {smtp}  Recipients: {len(recips)}  Teams: {'ON' if teams_on else 'OFF'}",
-        f" Last scan: {last}  ({live} live hosts){resume}",
+        f" Networks      : {len(nets)}",
+        f" Profile       : {prof}",
+        f" Privileges    : {priv}",
+        f" SMTP          : {'Connected' if smtp != 'not set' else 'Not set'}"
+        f"   Recipients    : {len(recips)}",
+        f" Teams         : {'Connected' if teams_on else 'Not configured'}",
+        f" Last Scan     : {last}",
+        f" Last Hosts    : {live}   Last Ports : {ports}{resume}",
     ]
 
 
+MENU_SECTIONS = [
+    (" SCANNING ", ["1", "2", "3", "4"]),
+    (" REPORTING ", ["5", "6", "7", "8", "9"]),
+    (" CONFIGURATION ", ["10", "11", "12"]),
+    (" NOTIFICATIONS ", ["13", "14"]),
+    (" MAINTENANCE ", ["15", "16", "17", "18", "19", "20", "21"]),
+]
+
+
 def interactive(cfg):
+    check_config_version(cfg)
     while True:
         banner()
+        print("\u2550" * 60)
+        print(" Environment Summary")
         print("-" * 60)
         for ln in _env_summary_lines(cfg):
             print(ln)
-        print("-" * 60)
-        items = list(MENU_ITEMS)
-        half = (len(items) + 1) // 2
-        left, right = items[:half], items[half:]
-        for i in range(half):
-            k1, l1 = left[i][0], left[i][1]
-            if i < len(right):
-                k2, l2 = right[i][0], right[i][1]
-                print(f"  {k1:>2}. {l1:<28} {k2:>2}. {l2}")
-            else:
-                print(f"  {k1:>2}. {l1}")
-        print("   0. Exit")
-        print("=" * 60)
+        items = {k: lbl for k, lbl, _f in MENU_ITEMS}
+        for title, keys in MENU_SECTIONS:
+            print(f"\n[{title}]")
+            for k in keys:
+                print(f"  {k:>2}. {items[k]}")
+        print("\n   0. Exit")
+        print("\u2550" * 60)
         c = input("Choice: ").strip()
         if c == "0":
             print("Goodbye."); return
