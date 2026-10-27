@@ -99,7 +99,16 @@ def health_check(cfg) -> list[tuple[str, str, str]]:
     add("Nmap", bool(nmap), False, ver or "missing - install via menu 11")
 
     mass = shutil.which("masscan")
-    add("Masscan", bool(mass), True, mass or "optional (not installed)")
+    mass_ver = ""
+    if mass:
+        try:
+            out = subprocess.run([mass, "--version"], capture_output=True,
+                                 text=True, timeout=10).stdout.strip()
+            mass_ver = out.splitlines()[0] if out else mass
+        except Exception:
+            mass_ver = mass
+    add("masscan", bool(mass), True,
+        mass_ver or "optional (not installed - nmap discovery will be used)")
 
     try:
         import yaml  # noqa

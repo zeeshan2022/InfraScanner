@@ -70,42 +70,161 @@ class Host:
 
 
 # ---------------------------------------------------------------------------
+# Subprocess helper (debug logging of command + stdout/stderr)
+# ---------------------------------------------------------------------------
+
+def _run_nmap(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
+    """Run nmap capturing output. Logs the exact command, exit code and
+    stdout/stderr at DEBUG level (enable via config logging.verbose_debug)."""
+    log.debug("EXEC: %s", " ".join(cmd))
+    t0 = time.time()
+    try:
+        proc = subprocess.run(cmd, check=False, timeout=timeout,
+                              capture_output=True, text=True)
+    except FileNotFoundError:
+        raise ScanError(f"binary not found: {cmd[0]} - run menu 11 (Install Requirements)")
+    except subprocess.TimeoutExpired:
+        log.error("TIMEOUT after %.0fs: %s", time.time() - t0, " ".join(cmd))
+        raise
+    log.debug("nmap exited rc=%d in %.1fs", proc.returncode, time.time() - t0)
+    if proc.stdout:
+        log.debug("nmap STDOUT:\n%s", proc.stdout)
+    if proc.stderr:
+        log.debug("nmap STDERR:\n%s", proc.stderr)
+    if proc.returncode != 0:
+        log.warning("nmap returned non-zero exit code %d for: %s",
+                    proc.returncode, " ".join(cmd))
+    return proc
+
+
+# ---------------------------------------------------------------------------
+# Parsing helpers (XML + GNMAP, with raw-vs-parsed validation counters)
+# ---------------------------------------------------------------------------
+
+def _host_addr(host_el) -> tuple[str, str]:
+    """Return (ip, mac) from a <host> element."""
+    ip = mac = ""
+    for a in host_el.findall("address"):
+        t = a.get("addrtype")
+        if t in ("ipv4", "ipv6"):
+            ip = a.get("addr")
+        elif t == "mac":
+            mac = a.get("addr")
+    return ip, mac
+
+
+def parse_gnmap_alive(gnmap_path: Path) -> list[str]:
+    """Parse an Nmap -oG file for up hosts ('Host: <ip> ()  Status: Up').
+    Works for both -sn sweeps and -Pn scans (any 'Status: Up' counts)."""
+    ips = []
+    import re
+    pat = re.compile(r"^Host:\s+(\S+).*Status:\s+Up", re.IGNORECASE)
+    with open(gnmap_path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            m = pat.match(line)
+            if m:
+                ips.append(m.group(1))
+    return ips
+
+
+# ---------------------------------------------------------------------------
 # Phase 1 - host discovery (ping sweep per VLAN)
 # ---------------------------------------------------------------------------
 
 def discover_network(cfg, subnet: str) -> list[str]:
-    """Nmap ping sweep; returns list of alive IPv4/IPv6 strings."""
+    """Nmap ping sweep; returns list of alive IPv4/IPv6 strings.
+
+    Uses --open so filtered ports don't mask live hosts, writes XML + GNMAP
+    raw files to scans/raw/, logs parsed-vs-raw counters, and falls back to
+    -Pn if the sweep produced no output file."""
     if not nmap_available():
         raise ScanError("nmap binary not found - run menu 11 (Install Requirements)")
     excl_h = cfg.get("exclude.hosts", []) or []
     excl_s = cfg.get("exclude.subnets", []) or []
-    tmp = cfg.dir("temp_dir") / f"discover_{stamp()}"
-    tmp.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ["nmap", "-sn", "-PS", "-PA", "-PU", "-PE",
-           "--host_timeout", cfg.get("performance.host_timeout", "15m"),
-           "-v", "-oX", f"{tmp}.xml", subnet]
+    raw = cfg.dir("scans_dir") / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    base = raw / f"discovery_{subnet.replace('/', '_')}_{stamp()}"
+    cmd = ["nmap", "-sn", "-PS21-25,53,80,110,135,139,143,443,445,3389",
+           "-PA,PU,PE", "--open",
+           "-v", "-oX", f"{base}.xml", "-oG", f"{base}.gnmap", subnet]
     par = str(cfg.get("performance.discovery_parallelism", "300"))
-    cmd += ["-T4", "--max_parallelism", par]
+    cmd += ["-T4", "--max-parallelism", par]
+    hto = str(cfg.get("performance.host_timeout", "15m")).rstrip("m")
+    cmd += ["--host-timeout", f"{hto}s"] if hto.isdigit() else \
+           ["--host-timeout", str(cfg.get("performance.host_timeout", "15m"))]
     log.info("Discovery %s ...", subnet)
+    alive: list[str] = []
     try:
-        subprocess.run(cmd, check=False, timeout=3600 * 4,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+        proc = _run_nmap(cmd, timeout=3600 * 4)
+    except ScanError:
+        raise
     except subprocess.TimeoutExpired:
         raise ScanError(f"Discovery timed out on {subnet}")
-    alive = []
-    if Path(f"{tmp}.xml").exists():
-        root = ET.parse(f"{tmp}.xml").getroot()
-        for host in root.iter("host"):
-            addr = ""
-            for a in host.findall("address"):
-                if a.get("addrtype") in ("ipv4", "ipv6"):
-                    addr = a.get("addr")
-            st = host.find("status")
-            if addr and st is not None and st.get("state") == "up":
-                if not ip_in_exclusions(addr, excl_h, excl_s):
+
+    xml_file = Path(f"{base}.xml")
+    gnmap_file = Path(f"{base}.gnmap")
+
+    # Primary parse: XML
+    raw_hosts = 0
+    up_hosts = 0
+    if xml_file.exists():
+        try:
+            root = ET.parse(xml_file).getroot()
+            for host in root.iter("host"):
+                raw_hosts += 1
+                addr, _mac = _host_addr(host)
+                st = host.find("status")
+                if addr and st is not None and st.get("state") == "up":
+                    up_hosts += 1
+                    if not ip_in_exclusions(addr, excl_h, excl_s):
+                        alive.append(addr)
+        except ET.ParseError as exc:
+            log.error("Discovery XML parse error in %s: %s", xml_file, exc)
+    else:
+        log.error("Discovery XML not found: %s (nmap rc=%s, stderr above)",
+                  xml_file, proc.returncode)
+
+    # Cross-validate with GNMAP parser
+    if gnmap_file.exists():
+        try:
+            g_alive = parse_gnmap_alive(gnmap_file)
+            log.debug("GNMAP cross-check %s: %d up hosts (XML said %d)",
+                      subnet, len(g_alive), up_hosts)
+            if not alive and g_alive:
+                alive = [ip for ip in g_alive
+                         if not ip_in_exclusions(ip, excl_h, excl_s)]
+                log.info("Recovered %d hosts via GNMAP fallback for %s",
+                         len(alive), subnet)
+        except OSError as exc:
+            log.error("GNMAP read error %s: %s", gnmap_file, exc)
+
+    # Fallback: some firewalls drop all probe types -> retry with -Pn
+    if not alive and not xml_file.exists():
+        log.warning("Discovery produced no output for %s; retrying with -Pn", subnet)
+        cmd2 = ["nmap", "-Pn", "-p21-25,53,80,110,135,139,143,443,445,3389",
+                "--open", "-v", "-oX", f"{base}_pn.xml", subnet]
+        try:
+            _run_nmap(cmd2, timeout=3600 * 4)
+        except subprocess.TimeoutExpired:
+            pass
+        pn = Path(f"{base}_pn.xml")
+        if pn.exists():
+            root = ET.parse(pn).getroot()
+            for host in root.iter("host"):
+                addr, _ = _host_addr(host)
+                ports_open = any(
+                    p.find("state") is not None and p.find("state").get("state") == "open"
+                    for p in host.iter("port"))
+                if addr and ports_open and not ip_in_exclusions(addr, excl_h, excl_s):
                     alive.append(addr)
-        Path(f"{tmp}.xml").unlink(missing_ok=True)
-    log.info("Discovery %s -> %d live hosts", subnet, len(alive))
+            pn.unlink(missing_ok=True)
+
+    log.info("Discovery %s -> raw_hosts=%d up_hosts=%d parsed_live=%d",
+             subnet, raw_hosts, up_hosts, len(alive))
+    if raw_hosts and not alive:
+        log.warning("Nmap saw %d hosts but parser found 0 live - check %s "
+                    "(enable logging.verbose_debug and inspect nmap STDOUT in scanner.log)",
+                    raw_hosts, xml_file)
     return sorted(set(alive), key=lambda x: ipaddress.ip_address(x))
 
 
@@ -143,12 +262,19 @@ def _write_hosts_txt(cfg, by_subnet, total_ips, total_alive):
 def build_nmap_cmd(cfg, profile: dict, target: str, out_xml: Path,
                    privileged: bool) -> list[str]:
     args = ["nmap"]
-    ports_spec = "T:1-65535" if profile.get("full_ports") \
-        else f"T:--top-{profile.get('top_ports', 1000)}"
+    # -Pn: host already proven alive by discovery (or explicitly requested);
+    # never let a blocked/filtered ping make a live host look dead.
+    args += ["-Pn"]
     if profile.get("udp_top100"):
-        # nmap cannot mix --top-N with explicit ranges; use combined top list
-        ports_spec = "--top-1100"
-    args += ["-p", ports_spec]
+        udp_list = ("U:53,67,68,69,123,137,138,161,162,389,445,514,5353,"
+                    "1194,1701,1900,4500,5060,5355")
+        tcp_part = "T:1-65535" if profile.get("full_ports") else \
+            f"T:1-{profile.get('top_ports', 1000)}"
+        args += ["-p", f"{tcp_part},{udp_list}"]
+    elif profile.get("full_ports"):
+        args += ["-p1-65535"]
+    else:
+        args += ["--top-ports", str(profile.get("top_ports", 1000))]
     if profile.get("version_detection"):
         args += ["-sV"]
         vi = profile.get("version_intensity")
@@ -164,11 +290,11 @@ def build_nmap_cmd(cfg, profile: dict, target: str, out_xml: Path,
     perf = cfg.get("performance", {}) or {}
     if perf.get("packet_rate"):
         args += ["--max-rate", str(perf["packet_rate"])]
-    args += ["--host_timeout", perf.get("host_timeout", "15m"),
-             "--script_timeout", perf.get("script_timeout", "60s"),
-             "--min_rt_timeout", perf.get("min_rtt_timeout", "200ms"),
+    args += ["--host-timeout", perf.get("host_timeout", "15m"),
+             "--script-timeout", perf.get("script_timeout", "60s"),
+             "--min-rtt-timeout", perf.get("min_rtt_timeout", "200ms"),
              "--retries", str(perf.get("retries", 1))]
-    args += ["-oX", str(out_xml), target]
+    args += ["-oX", str(out_xml), "-oG", f"{out_xml}.gnmap", target]
     return args
 
 
@@ -181,23 +307,32 @@ def _timing(name: str) -> str:
 
 
 def parse_nmap_xml(xml_path: Path, networks: list) -> Host | None:
-    """Parse a single-host nmap XML into Host dataclass."""
+    """Parse an nmap XML (single- or multi-host) into Host dataclass.
+    Returns the first UP host; logs why parsing failed for debugging."""
     if not xml_path.exists():
+        log.error("Nmap XML not found after scan: %s", xml_path)
         return None
-    root = ET.parse(xml_path).getroot()
-    host_el = root.find("host")
+    try:
+        root = ET.parse(xml_path).getroot()
+    except ET.ParseError as exc:
+        log.error("Nmap XML parse error in %s: %s", xml_path, exc)
+        return None
+    hosts_el = root.findall("host")
+    if not hosts_el:
+        log.error("Nmap XML %s contains no <host> elements", xml_path)
+        return None
+    host_el = None
+    for he in hosts_el:
+        st = he.find("status")
+        if st is not None and st.get("state") == "up":
+            host_el = he
+            break
     if host_el is None:
+        log.warning("Nmap XML %s: all %d host(s) reported DOWN by scanner",
+                    xml_path.name, len(hosts_el))
         return None
-    status = host_el.find("status")
-    if status is None or status.get("state") != "up":
-        return None
-    ip = hostname = mac = ""
-    for a in host_el.findall("address"):
-        t = a.get("addrtype")
-        if t in ("ipv4", "ipv6"):
-            ip = a.get("addr")
-        elif t == "mac":
-            mac = a.get("addr")
+    hostname = ""
+    ip, mac = _host_addr(host_el)
     names = host_el.find("hostnames")
     if names is not None:
         hn = names.find("hostname")
@@ -211,12 +346,17 @@ def parse_nmap_xml(xml_path: Path, networks: list) -> Host | None:
         line = os_el.find("osmatch")
         if line is not None:
             h.os_guess = line.get("name", "Unknown")
-    for port_el in host_el.iter("port"):
+    ports_el = host_el.find("ports")
+    port_els = list(ports_el.findall("port")) if ports_el is not None \
+        else list(host_el.iter("port"))
+    open_total = 0
+    for port_el in port_els:
         pid = port_el.get("protocol", "tcp")
-        state = (port_el.find("state") or {}).get("state", "unknown") \
-            if port_el.find("state") is not None else "unknown"
+        st_el = port_el.find("state")
+        state = st_el.get("state") if st_el is not None else "unknown"
         if state != "open":
             continue
+        open_total += 1
         svc = port_el.find("service")
         p = Port(port=int(port_el.get("portid", "0")), protocol=pid, state=state)
         if svc is not None:
@@ -226,6 +366,8 @@ def parse_nmap_xml(xml_path: Path, networks: list) -> Host | None:
             p.extrainfo = svc.get("extrainfo", "")
             p.tunnel = svc.get("tunnel", "")
         h.ports.append(p)
+    log.debug("XML parse %s: hosts_in_file=%d open_ports_parsed=%d",
+              xml_path.name, len(hosts_el), open_total)
     # host scripts (ssl-cert, smb-os-discovery, http-title etc.)
     hs = host_el.find("hostscript")
     if hs is not None:
@@ -241,17 +383,13 @@ def scan_host(cfg, profile: dict, target: str, privileged: bool) -> Host | None:
     cmd = build_nmap_cmd(cfg, profile, target, out, privileged)
     log.info("Deep scan %s (%s)", target, cfg.get("scan.profile"))
     try:
-        subprocess.run(cmd, check=False, timeout=7200,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+        _run_nmap(cmd, timeout=7200)
     except subprocess.TimeoutExpired:
         log.error("Deep scan timed out on %s", target)
     h = parse_nmap_xml(out, cfg.get("networks", []))
-    if h:
-        keep = raw / f"result_{target}_{stamp()}.xml"
-        try:
-            out.rename(keep)
-        except OSError:
-            pass
+    # Raw XML/GNMAP always kept in scans/raw/ for post-mortem debugging.
+    log.debug("Parsed result for %s: live=%s open_ports=%d (raw: %s)",
+              target, bool(h), len(h.ports) if h else 0, out)
     return h
 
 
@@ -399,16 +537,32 @@ def scan_single_target(cfg, target: str) -> dict:
         sub = {target: ips}
         _write_hosts_txt(cfg, sub, ipaddress.ip_network(target, strict=False).num_addresses, len(ips))
         return run_full_scan(cfg, sub)
+    from .notifier import notify_event
+    notify_event(cfg, "scan_started", {
+        "networks": 1, "ips": 1, "live": 0,
+        "operator": _whoami(), "profile": profile_name})
     h = scan_host(cfg, profile, target, privileged)
     hosts = [h] if h else []
+    if not hosts:
+        # XML said down/nothing - cross-check with a GNMAP-parsed sweep of
+        # the single IP before declaring it dead.
+        log.warning("Single-IP %s parsed as live=0; running discovery cross-check",
+                    target)
+        alive = discover_network(cfg, f"{target}/32")
+        if alive:
+            h = scan_host(cfg, dict(profile, full_ports=False), target, privileged)
+            hosts = [h] if h else []
+    summary = {"live_hosts": len(hosts),
+               "open_ports": sum(len(x.ports) for x in hosts),
+               "duration_sec": round(time.time() - started, 1)}
+    notify_event(cfg, "scan_completed", summary)
     processed = cfg.dir("scans_dir") / "processed"
     processed.mkdir(parents=True, exist_ok=True)
     json.dump({"scan_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
                "profile": profile_name, "duration_sec": round(time.time() - started, 1),
                "hosts": [x.to_dict() for x in hosts]},
               open(processed / "latest_inventory.json", "w"), indent=2)
-    return {"live_hosts": len(hosts), "open_ports": sum(len(x.ports) for x in hosts),
-            "duration_sec": round(time.time() - started, 1)}
+    return summary
 
 
 def _can_raw_sockets() -> bool:

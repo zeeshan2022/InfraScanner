@@ -20,6 +20,10 @@ def setup(cfg) -> None:
     log_dir: Path = cfg.dir("logs_dir")
     log_dir.mkdir(parents=True, exist_ok=True)
     level = getattr(logging, str(cfg.get("logging.level", "INFO")).upper(), logging.INFO)
+    if cfg.get("logging.verbose_debug", False):
+        # Verbose debug mode: log every nmap command, its stdout/stderr and
+        # parser counters (raw vs parsed) to scanner.log.
+        level = logging.DEBUG
     max_bytes = int(cfg.get("logging.max_bytes", 5_242_880))
     backups = int(cfg.get("logging.backup_count", 5))
 

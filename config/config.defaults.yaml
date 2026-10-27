@@ -131,6 +131,8 @@ retention:
 
 logging:
   level: INFO                           # DEBUG INFO WARNING ERROR
+  verbose_debug: false                  # true = log exact nmap commands,
+                                        # stdout/stderr and parser counters
   max_bytes: 5242880                    # 5 MB per log file
   backup_count: 5
 
