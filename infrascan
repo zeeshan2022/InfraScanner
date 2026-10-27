@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# InfraScanner launcher - Copyright (c) ZXSPRD.COM - GNU GPL v3
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="$DIR/src:${PYTHONPATH:-}"
+PY=python3
+command -v $PY >/dev/null 2>&1 || { echo "python3 not found - run ./install.sh"; exit 1; }
+exec "$PY" -m infrascan "$@"
