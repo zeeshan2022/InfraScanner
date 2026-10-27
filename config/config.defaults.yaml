@@ -82,7 +82,7 @@ performance:
   packet_rate: ""                       # nmap --max-rate (empty = default)
   host_timeout: "15m"
   script_timeout: "60s"
-  retries: 1
+  retries: 1                            # maps to nmap --max-retries (NOT --retries)
   min_rtt_timeout: "200ms"
   discovery_parallelism: "300"          # ping sweep parallelism
 
@@ -128,6 +128,7 @@ retention:
   scan_days: 90                         # raw scan data kept 90 days
   report_days: 90                       # daily reports kept 90 days
   monthly_keep: 12                      # last 12 monthly archives
+  config_backups: 20                    # last 20 config backups (backups/ + /tmp/InfraScanner)
 
 logging:
   level: INFO                           # DEBUG INFO WARNING ERROR

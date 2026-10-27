@@ -40,9 +40,24 @@ def _connect(cfg):
     return srv
 
 
+def build_summary(cfg, inventory: dict) -> dict:
+    """Build an email/notification summary dict from a scan inventory."""
+    inv = inventory or {}
+    return {
+        "scan_time": inv.get("scan_time", ""),
+        "profile": inv.get("profile", ""),
+        "live_hosts": len(inv.get("hosts", [])),
+        "open_ports": sum(len(h.get("ports", [])) for h in inv.get("hosts", [])),
+        "total_ips": "", "networks": "",
+    }
+
+
 def send_reports(cfg, attachments: list[Path], summary: dict,
-                 critical: bool = False) -> bool:
-    """Send report attachments. Returns True on success."""
+                 critical: bool = False, subject_suffix: str = "") -> bool:
+    """Send report attachments. Returns True on success.
+
+    subject_suffix e.g. 'Historical 20261020' -> appended to the subject so
+    historical re-sends are distinguishable from live scan reports."""
     if not cfg.get("email.enabled", True):
         log.info("Email disabled in config; skipping send.")
         return False
@@ -56,6 +71,8 @@ def send_reports(cfg, attachments: list[Path], summary: dict,
     subject = f"{prefix} {hosts} Hosts Discovered | {date}"
     if critical:
         subject = f"{prefix} Infrastructure Scan Found Critical Exposure - {date}"
+    if subject_suffix:
+        subject += f" ({subject_suffix})"
 
     body_lines = [
         "InfraScanner infrastructure scan summary",

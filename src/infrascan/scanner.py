@@ -73,27 +73,120 @@ class Host:
 # Subprocess helper (debug logging of command + stdout/stderr)
 # ---------------------------------------------------------------------------
 
+# Nmap CLI options we generate, validated against Nmap 7.92 / current stable.
+# Maps our internal/performance keys to the correct nmap flag names.
+_NMAP_FLAG_FIXES = {"--retries": "--max-retries"}   # --retries does NOT exist
+
+
+def validate_nmap_cmd(cmd: list[str]) -> None:
+    """Pre-execution validation of generated nmap arguments.
+
+    Rejects known-bad flags (e.g. --retries, which makes nmap exit RC=255
+    before scanning anything) and normalises them to the correct syntax.
+    Raises ScanError on anything unfixable so a host scan aborts immediately
+    instead of silently producing no XML."""
+    fixed, out = [], []
+    for tok in cmd:
+        if tok in _NMAP_FLAG_FIXES:
+            log.warning("Invalid nmap option '%s' in generated command - "
+                        "correcting to '%s'", tok, _NMAP_FLAG_FIXES[tok])
+            out.append(_NMAP_FLAG_FIXES[tok])
+            continue
+        out.append(tok)
+    joined = " ".join(out)
+    # sanity checks on numeric/enum style args
+    import re as _re
+    m = _re.search(r"--top-ports (\S+)", joined)
+    if m and not m.group(1).isdigit():
+        raise ScanError(f"invalid --top-ports value: {m.group(1)}")
+    m = _re.search(r"-T(\S+)", joined)
+    if m and m.group(1) not in "012345":
+        raise ScanError(f"invalid timing template: -T{m.group(1)}")
+    m = _re.search(r"--max-retries (\S+)", joined)
+    if m and not m.group(1).isdigit():
+        raise ScanError(f"invalid --max-retries value: {m.group(1)}")
+    cmd[:] = out
+
+
+def record_command(cmd: list[str], rc: int | None = None,
+                   stderr: str = "", duration: float = 0.0) -> None:
+    """Append the executed nmap command + result to logs/last_commands.log
+    (rolling, last 200 entries kept) for the Diagnostics menu item."""
+    try:
+        from .config_manager import ROOT
+        p = ROOT / cfg_logs_dir() / "last_commands.log"
+        line = json.dumps({
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "cmd": " ".join(cmd), "rc": rc,
+            "duration_sec": round(duration, 1),
+            "stderr_tail": (stderr or "")[-500:],
+        })
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        # keep rolling window of 200 commands
+        try:
+            lines = p.read_text(encoding="utf-8").splitlines()
+            if len(lines) > 200:
+                p.write_text("\n".join(lines[-200:]) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+    except Exception:  # diagnostics must never break scanning
+        pass
+
+
+_CFG_REF = None  # set by _run_nmap via module-level config pointer
+
+
+def cfg_logs_dir() -> Path:
+    if _CFG_REF is not None:
+        try:
+            return _CFG_REF.dir("logs_dir")
+        except Exception:
+            pass
+    return Path("logs")
+
+
 def _run_nmap(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
     """Run nmap capturing output. Logs the exact command, exit code and
-    stdout/stderr at DEBUG level (enable via config logging.verbose_debug)."""
+    stdout/stderr (DEBUG always; WARNING when verbose_debug or failure).
+    Aborts immediately on non-zero return code with full stderr surfaced."""
+    validate_nmap_cmd(cmd)
+    verbose = bool(_CFG_REF and _CFG_REF.get("logging.verbose_debug", False))
     log.debug("EXEC: %s", " ".join(cmd))
+    if verbose:
+        log.info("NMAP CMD: %s", " ".join(cmd))
     t0 = time.time()
     try:
         proc = subprocess.run(cmd, check=False, timeout=timeout,
                               capture_output=True, text=True)
     except FileNotFoundError:
+        record_command(cmd, rc=-1, stderr="binary not found",
+                      duration=time.time() - t0)
         raise ScanError(f"binary not found: {cmd[0]} - run menu 11 (Install Requirements)")
     except subprocess.TimeoutExpired:
+        record_command(cmd, rc=-1, stderr="TIMEOUT", duration=time.time() - t0)
         log.error("TIMEOUT after %.0fs: %s", time.time() - t0, " ".join(cmd))
         raise
-    log.debug("nmap exited rc=%d in %.1fs", proc.returncode, time.time() - t0)
+    dur = time.time() - t0
+    record_command(cmd, rc=proc.returncode, stderr=proc.stderr or "",
+                   duration=dur)
+    log.debug("nmap exited rc=%d in %.1fs", proc.returncode, dur)
     if proc.stdout:
         log.debug("nmap STDOUT:\n%s", proc.stdout)
+        if verbose and proc.returncode == 0:
+            log.info("nmap STDOUT (tail):\n%s", proc.stdout[-2000:])
     if proc.stderr:
         log.debug("nmap STDERR:\n%s", proc.stderr)
     if proc.returncode != 0:
-        log.warning("nmap returned non-zero exit code %d for: %s",
-                    proc.returncode, " ".join(cmd))
+        # Full stderr ALWAYS logged at error level (requirement #5) and shown
+        # to the operator when verbose debug is on (requirement #6).
+        log.error("nmap FAILED rc=%d for: %s\nSTDERR:\n%s",
+                  proc.returncode, " ".join(cmd), proc.stderr.strip() or "(empty)")
+        if verbose and proc.stderr:
+            print(f"\n!! nmap stderr:\n{proc.stderr.strip()}")
+        raise ScanError(
+            f"nmap exited with code {proc.returncode}: "
+            f"{(proc.stderr or '').strip()[:300] or 'see logs/scanner.log'}")
     return proc
 
 
@@ -153,6 +246,8 @@ def discover_network(cfg, subnet: str) -> list[str]:
     cmd += ["--host-timeout", f"{hto}s"] if hto.isdigit() else \
            ["--host-timeout", str(cfg.get("performance.host_timeout", "15m"))]
     log.info("Discovery %s ...", subnet)
+    global _CFG_REF
+    _CFG_REF = cfg
     alive: list[str] = []
     try:
         proc = _run_nmap(cmd, timeout=3600 * 4)
@@ -293,7 +388,9 @@ def build_nmap_cmd(cfg, profile: dict, target: str, out_xml: Path,
     args += ["--host-timeout", perf.get("host_timeout", "15m"),
              "--script-timeout", perf.get("script_timeout", "60s"),
              "--min-rtt-timeout", perf.get("min_rtt_timeout", "200ms"),
-             "--retries", str(perf.get("retries", 1))]
+             # NOTE: nmap has no '--retries' option (exits RC=255).
+             # The correct flag is '--max-retries'.
+             "--max-retries", str(perf.get("retries", 1))]
     args += ["-oX", str(out_xml), "-oG", f"{out_xml}.gnmap", target]
     return args
 
@@ -377,19 +474,21 @@ def parse_nmap_xml(xml_path: Path, networks: list) -> Host | None:
 
 
 def scan_host(cfg, profile: dict, target: str, privileged: bool) -> Host | None:
+    global _CFG_REF
+    _CFG_REF = cfg          # lets _run_nmap honour logging.verbose_debug
     raw = cfg.dir("scans_dir") / "raw"
     raw.mkdir(parents=True, exist_ok=True)
     out = raw / f"host_{target.replace(':', '_')}_{stamp()}.xml"
     cmd = build_nmap_cmd(cfg, profile, target, out, privileged)
     log.info("Deep scan %s (%s)", target, cfg.get("scan.profile"))
     try:
-        _run_nmap(cmd, timeout=7200)
+        _run_nmap(cmd, timeout=7200)   # raises ScanError on rc!=0 -> abort host
     except subprocess.TimeoutExpired:
         log.error("Deep scan timed out on %s", target)
     h = parse_nmap_xml(out, cfg.get("networks", []))
     # Raw XML/GNMAP always kept in scans/raw/ for post-mortem debugging.
-    log.debug("Parsed result for %s: live=%s open_ports=%d (raw: %s)",
-              target, bool(h), len(h.ports) if h else 0, out)
+    log.info("Parse result %s: raw_xml=%s live=%s open_ports_parsed=%d",
+             target, out.exists(), bool(h), len(h.ports) if h else 0)
     return h
 
 
