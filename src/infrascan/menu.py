@@ -292,15 +292,16 @@ def menu_configure(cfg):
 Configuration
  1. Network Ranges (add / edit / delete VLANs)
  2. Exclusions (hosts / subnets)
- 3. Email Settings
- 4. Teams Webhook Settings
- 5. Scan Profile & Timing
- 6. Performance Settings (threads, packet rate, timeouts)
- 7. Report Settings (formats, branding, classification)
- 8. Retention Settings
- 9. Restore Default Scan Settings
-10. Export Config (backup copy)
-11. Import Config (restore from backup)
+ 3. SMTP Settings (server, port, TLS, auth, sender)
+ 4. Receipt Emails (add / remove / modify recipients)
+ 5. Teams Webhook Settings
+ 6. Scan Profile & Timing
+ 7. Performance Settings (threads, packet rate, timeouts)
+ 8. Report Settings (formats, branding, classification)
+ 9. Retention Settings
+10. Restore Default Scan Settings
+11. Export Config (backup copy)
+12. Import Config (restore from backup)
  0. Back""")
         c = input("> ").strip()
         if c == "0":
@@ -310,10 +311,12 @@ Configuration
         elif c == "2":
             cfg_exclusions(cfg)
         elif c == "3":
-            cfg_email(cfg)
+            cfg_smtp(cfg)
         elif c == "4":
-            cfg_teams(cfg)
+            cfg_recipients(cfg)
         elif c == "5":
+            cfg_teams(cfg)
+        elif c == "6":
             _profile_menu(cfg)
             mw = input("Enable maintenance-window protection? [y/N]: ")
             if mw.lower() == "y":
@@ -325,11 +328,11 @@ Configuration
             else:
                 cfg.set("scan.maintenance_window.enabled", False)
             cfg.save()
-        elif c == "6":
-            cfg_performance(cfg)
         elif c == "7":
-            cfg_reporting(cfg)
+            cfg_performance(cfg)
         elif c == "8":
+            cfg_reporting(cfg)
+        elif c == "9":
             rd = input("Report retention days [90]: ") or "90"
             sd = input("Scan retention days [90]: ") or "90"
             mk = input("Keep monthly archives [12]: ") or "12"
@@ -337,14 +340,14 @@ Configuration
             cfg.set("retention.scan_days", int(sd))
             cfg.set("retention.monthly_keep", int(mk))
             cfg.save()
-        elif c == "9":
+        elif c == "10":
             if input("Restore factory DEFAULT SCAN settings? [y/N]: ").lower() == "y":
                 cfg.backup()
                 cfg.restore_scan_defaults()
                 print("Scan/profile/performance settings restored to defaults.")
-        elif c == "10":
-            print("Backup written:", cfg.backup())
         elif c == "11":
+            print("Backup written:", cfg.backup())
+        elif c == "12":
             bdir = cfg.root / "backups"
             files = sorted(bdir.glob("config_*.yaml")) if bdir.exists() else []
             for i, f in enumerate(files, 1):
@@ -411,12 +414,14 @@ def cfg_exclusions(cfg):
     print("Exclusions saved.")
 
 
-def cfg_email(cfg):
-    def ask(key, label, secret=False):
+def cfg_smtp(cfg):
+    """SMTP connection settings only (no recipients - see Receipt Emails)."""
+    def ask(key, label):
         cur = cfg.get(key, "")
         val = input(f"{label} [{cur}]: ").strip()
         if val:
             cfg.set(key, val)
+    print("\nSMTP Settings")
     ask("email.smtp_server", "SMTP server")
     p = input(f"SMTP port [{cfg.get('email.smtp_port', 587)}]: ").strip()
     if p.isdigit():
@@ -427,14 +432,29 @@ def cfg_email(cfg):
         cfg.set("email.password", getpass.getpass("Password: "))
     tls = input("Use STARTTLS/TLS? [Y/n]: ").strip()
     cfg.set("email.use_tls", tls.lower() != "n")
-    recips = list(cfg.get("email.recipients", []) or [])
-    print("Recipients:")
-    recips = _edit_list(recips, "recipient", "Recipient email: ")
-    cfg.set("email.recipients", recips)
+    ask("email.sender", "Sender (From) address")
+    ask("email.subject_prefix", "Subject prefix")
     en = input("Email enabled? [Y/n]: ").strip()
     cfg.set("email.enabled", en.lower() != "n")
     cfg.save()
-    print("Email settings saved.")
+    print("SMTP settings saved. Use 'Test Email' from the main menu to verify.")
+
+
+def cfg_recipients(cfg):
+    """Receipt email management: add / remove / modify report recipients."""
+    print("\nReceipt Emails (report recipients)")
+    recips = list(cfg.get("email.recipients", []) or [])
+    recips = _edit_list(recips, "recipient", "Recipient email: ")
+    # keep only non-empty, de-duplicated entries
+    seen, clean = set(), []
+    for r in recips:
+        r = r.strip()
+        if r and r not in seen:
+            seen.add(r)
+            clean.append(r)
+    cfg.set("email.recipients", clean)
+    cfg.save()
+    print("Recipient list saved:", ", ".join(clean) if clean else "(none)")
 
 
 def cfg_teams(cfg):
