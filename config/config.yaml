@@ -118,6 +118,7 @@ retention:
   monthly_keep: 12
 logging:
   level: INFO
+  verbose_debug: false
   max_bytes: 5242880
   backup_count: 5
 paths:

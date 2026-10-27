@@ -302,6 +302,7 @@ Configuration
 10. Restore Default Scan Settings
 11. Export Config (backup copy)
 12. Import Config (restore from backup)
+13. Verbose Debug Mode (log nmap commands, stdout/stderr, parser counters)
  0. Back""")
         c = input("> ").strip()
         if c == "0":
@@ -345,6 +346,15 @@ Configuration
                 cfg.backup()
                 cfg.restore_scan_defaults()
                 print("Scan/profile/performance settings restored to defaults.")
+        elif c == "13":
+            cur = bool(cfg.get("logging.verbose_debug", False))
+            ans = input(f"Enable verbose debug mode? current={'ON' if cur else 'OFF'} [y/N]: ").strip().lower()
+            cfg.set("logging.verbose_debug", ans == "y")
+            cfg.save()
+            print("Verbose debug is now", "ON - full nmap command/stdout/stderr and parser"
+                  " counters will be written to logs/scanner.log"
+                  if ans == "y" else "OFF")
+            print("Note: takes effect on next program start.")
         elif c == "11":
             print("Backup written:", cfg.backup())
         elif c == "12":

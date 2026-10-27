@@ -62,9 +62,9 @@ have nmap && log "Nmap OK: $(nmap --version | head -1)" || warn "Nmap still miss
 
 if ! have masscan; then
     if $SUDO $PKG_INSTALL masscan >/dev/null 2>&1; then
-        log "Masscan installed (optional accelerator)."
+        log "masscan installed (optional accelerator)."
     else
-        warn "Masscan not available on this distro repo (optional - Nmap discovery will be used)."
+        warn "masscan not available on this distro repo (optional - Nmap discovery will be used)."
     fi
 fi
 

@@ -121,7 +121,7 @@ python3 -m pip install -r requirements.txt
 ```
 
 Requirements: Python ≥ 3.9 (3.11+ recommended), Nmap ≥ 7.x. PDF generation uses **fpdf2**
-(pure Python — no wkhtmltopdf/WeasyPrint system libraries needed). Optional: Masscan for
+(pure Python — no wkhtmltopdf/WeasyPrint system libraries needed). Optional: masscan for
 faster discovery (auto-detected, not required).
 
 Uninstall: `sudo ./uninstall.sh` (removes cron entries created by the scheduler; leaves your
@@ -441,7 +441,7 @@ Menu **16. Maintenance** (also `./infrascan cleanup`, and automatic after each s
 Menu **15. Health Check** validates the whole stack before you trust a scan:
 
 ```text
-Python OK · Nmap OK · Masscan optional · fpdf2 OK · SMTP OK (auth probe) ·
+Python OK · Nmap OK · masscan optional · fpdf2 OK · SMTP OK (auth probe) ·
 Teams OK (test card) · Disk Space OK · Cron OK · Writable dirs OK · Root status
 ```
 
@@ -471,9 +471,13 @@ Teams OK (test card) · Disk Space OK · Cron OK · Writable dirs OK · Root sta
 | False "new host" alerts | DHCP devices — expected; excluded ranges via Configure → 2 |
 | Permission errors writing reports/logs | Run as root or fix ownership of `reports/`, `scans/`, `logs/` |
 | Interrupted/power loss mid-scan | Menu → 4 Resume Interrupted Scan (skips already-completed hosts) |
+| `nmap -sn` shows hosts up but InfraScanner reports **0 live hosts** | Enable **Configure → 13 Verbose Debug Mode**, re-run discovery, then inspect `logs/scanner.log`: it logs the exact nmap command, its stdout/stderr, and counters (`raw_hosts=N up_hosts=M parsed_live=K`). Raw XML + GNMAP files are saved under `scans/raw/` for comparison. If `up_hosts>0` but `parsed_live=0`, check exclusions (Configure → 2). Deep scans now always run with `-Pn` against discovered hosts, so firewalled ping responses can no longer hide live systems. |
 
 Logs: `logs/scanner.log` (pipeline), `logs/email.log`, `logs/teams.log`, `logs/cron.log` —
-all rotating, level set by `logging.level`.
+all rotating, level set by `logging.level`. Set `logging.verbose_debug: true` in
+`config/config.yaml` (or Configure → 13) to log every nmap command line, its full
+stdout/stderr, raw-vs-parsed host/port counters, and keep all raw `.xml`/`.gnmap`
+files in `scans/raw/` for parser post-mortems.
 
 ---
 
