@@ -133,13 +133,44 @@ class Config:
         return errs
 
     # ------------------------------------------------------------- backups
+    EMERGENCY_BACKUP_DIR = Path("/tmp/InfraScanner")
+
     def backup(self, dest_dir: Path | None = None) -> Path:
+        """Save a timestamped config backup into the repository backups/
+        folder AND an emergency copy in /tmp/InfraScanner. Only the last 20
+        backups are kept (retention.config_backups)."""
         dest_dir = dest_dir or (ROOT / "backups")
         dest_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         dest = dest_dir / f"config_{stamp}.yaml"
         shutil.copy2(self.path, dest)
+        # emergency copy survives accidental deletion of the repo folder
+        try:
+            emerg = self.EMERGENCY_BACKUP_DIR / "backups"
+            emerg.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(dest, emerg / dest.name)
+            self._prune_backups(emerg)
+        except OSError:
+            pass
+        self._prune_backups(dest_dir)
         return dest
+
+    def _prune_backups(self, bdir: Path) -> None:
+        keep = int(self.get("retention.config_backups", 20))
+        files = sorted(bdir.glob("config_*.yaml"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        for old in files[keep:]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+    def list_backups(self) -> list[Path]:
+        """All config backups in the repository backups/ folder, newest first."""
+        bdir = ROOT / "backups"
+        files = sorted(bdir.glob("config_*.yaml"),
+                       key=lambda p: p.stat().st_mtime, reverse=True) if bdir.exists() else []
+        return files
 
     def restore_from(self, src: Path | str) -> None:
         src = Path(src)

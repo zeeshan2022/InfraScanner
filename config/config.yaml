@@ -116,6 +116,7 @@ retention:
   scan_days: 90
   report_days: 90
   monthly_keep: 12
+  config_backups: 20
 logging:
   level: INFO
   verbose_debug: false

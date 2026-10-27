@@ -81,8 +81,12 @@ def _os_class(osname: str) -> str:
 
 # ------------------------------------------------------------------- builders
 def generate_reports(cfg, inventory: dict | None = None,
-                     changes: dict | None = None) -> list[Path]:
-    """Produce all configured report formats; returns file paths."""
+                     changes: dict | None = None,
+                     date_override: str | None = None) -> list[Path]:
+    """Produce all configured report formats; returns file paths.
+
+    date_override (YYYYMMDD): rebuild reports for a past scan using that
+    archive stamp instead of today's date (used by Send Historical Reports)."""
     inv = inventory or load_latest_inventory(cfg)
     if not inv:
         raise RuntimeError("No scan data found. Run a scan first.")
@@ -106,7 +110,7 @@ def generate_reports(cfg, inventory: dict | None = None,
     rdirs = {f: cfg.dir("reports_dir") / f for f in formats}
     for d in rdirs.values():
         d.mkdir(parents=True, exist_ok=True)
-    date = datetime.now().strftime("%Y%m%d")
+    date = date_override or datetime.now().strftime("%Y%m%d")
 
     if "html" in formats:
         out_paths.append(_write_html(cfg, rdirs["html"], date, hosts, inventories,
@@ -349,10 +353,11 @@ td,th{{border:1px solid #aaa;padding:3px 8px}}</style></head><body>
 
 
 # ----------------------------------------------------------------------- ZIP
-def package_zip(cfg, report_paths: list[Path]) -> Path | None:
+def package_zip(cfg, report_paths: list[Path],
+                date_override: str | None = None) -> Path | None:
     if not cfg.get("reporting.package_zip", True) or not report_paths:
         return None
-    date = datetime.now().strftime("%Y%m%d")
+    date = date_override or datetime.now().strftime("%Y%m%d")
     zp = cfg.dir("reports_dir") / f"Infrastructure_Report_{date}.zip"
     with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
         for p in report_paths:
@@ -360,3 +365,65 @@ def package_zip(cfg, report_paths: list[Path]) -> Path | None:
                 zf.write(p, arcname=p.name)
     log.info("ZIP bundle: %s", zp)
     return zp
+
+
+# ------------------------------------------------------------- history access
+def list_report_history(cfg) -> list[dict]:
+    """All generated reports (latest/, format dirs, archive/) grouped by date
+    stamp, newest first."""
+    rdir = cfg.dir("reports_dir")
+    groups: dict[str, list[Path]] = {}
+    search_roots = [rdir / "latest", rdir / "archive"]
+    for sub in ("html", "csv", "pdf", "json"):
+        search_roots.append(rdir / sub)
+    for base in search_roots:
+        if not base.exists():
+            continue
+        for f in sorted(base.rglob("*")):
+            if not f.is_file() or f.suffix.lower() not in (
+                    ".html", ".csv", ".pdf", ".json", ".zip"):
+                continue
+            import re as _re
+            m = _re.search(r"(\d{8})", f.stem)
+            key = m.group(1) if m else datetime.fromtimestamp(
+                f.stat().st_mtime).strftime("%Y%m%d")
+            groups.setdefault(key, [])
+            if f.name not in [p.name for p in groups[key]]:
+                groups[key].append(f)
+    out = []
+    for date in sorted(groups, reverse=True):
+        files = sorted(groups[date])
+        scan_time = ""
+        jf = next((f for f in files if f.suffix == ".json"), None)
+        if jf:
+            try:
+                scan_time = json.loads(jf.read_text()).get("scan_time", "")
+            except Exception:
+                pass
+        out.append({"date": date, "files": files, "scan_time": scan_time})
+    return out
+
+
+def load_inventory_for_date(cfg, date: str) -> dict | None:
+    """Load a past scan inventory: prefer the archived JSON report for that
+    date stamp, fall back to scans/processed/inventory_*.json matching it."""
+    for entry in list_report_history(cfg):
+        if entry["date"] == date:
+            jf = next((f for f in entry["files"] if f.suffix == ".json"), None)
+            if jf:
+                try:
+                    data = json.loads(jf.read_text())
+                    if "hosts" in data:
+                        return data
+                except Exception:
+                    pass
+    proc = cfg.dir("scans_dir") / "processed"
+    cands = sorted(proc.glob(f"inventory_*{date}*.json")) + \
+        sorted((proc.parent / "archive").glob(f"inventory_*{date}*.json")) \
+        if proc.exists() else []
+    for c in reversed(cands):
+        try:
+            return json.load(open(c))
+        except Exception:
+            continue
+    return None

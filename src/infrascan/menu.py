@@ -24,7 +24,7 @@ from . import __version__
 from .config_manager import Config, ConfigError
 from .logger import setup as log_setup, get
 from .maintenance import cleanup, health_check
-from .mailer import send_reports, send_test as email_test, EmailError
+from .mailer import send_reports, build_summary, send_test as email_test, EmailError
 from .notifier import notify_event, send_test as teams_test
 from .reporter import generate_reports, load_latest_inventory, package_zip, compute_stats
 from .scanner import (ScanError, discover_all, run_full_scan, scan_single_target,
@@ -36,17 +36,17 @@ from .utils import human_duration, is_root
 log = get("scanner")
 
 BANNER = r"""
-============================================================
-   ____       _                ____
-  / ___|_ __ (_)_ __ __ _     / ___|  ___ __ _ _ __  _ __   ___ _ __
- | |   | '_ \| | '__/ _` |_  | |  _ / _ \ '_ \| '_ \| '_ \ / _ \ '__|
- | |___| | | | | | | (_| | | | |_| |  __/ |_) | |_) | |_) |  __/ |
-  \____|_| |_|_|_|  \__,_|_|  \____|\___| .__/| .__/| .__/ \___|_|
-                                        |_|   |_|   |_|
-  Enterprise Network Discovery & Reporting Platform
-  Copyright (c) ZXSPRD.COM  -  GNU GPL v3  -  zxsprd.com
-  Version {ver}
-============================================================
+╔════════════════════════════════════════════════════════════╗
+║   ____       _                ____                         ║
+║  / ___|_ __ (_)_ __ __ _     / ___|  ___ __ _ _ __  _ __   ║
+║ | |   | '_ \| | '__/ _` |_  | |  _ / _ \ '_ \| '_ \| '_ \  ║
+║ | |___| | | | | | | (_| | | | |_| |  __/ |_) | |_) | |_) | ║
+║  \____|_| |_|_|_|  \__,_|_|  \____|\___| .__/| .__/| .__/  ║
+║                                        |_|   |_|   |_|     ║
+║  Enterprise Network Discovery & Reporting Platform         ║
+║  Copyright (c) ZXSPRD.COM  -  GNU GPL v3  -  zxsprd.com    ║
+║  Version {ver}                                              ║
+╚════════════════════════════════════════════════════════════╝
 """
 
 
@@ -203,11 +203,7 @@ def act_send_reports(cfg):
         print("No reports found in reports/latest. Generate first."); return _pause()
     zp = package_zip(cfg, files)
     attachments = [zp] if zp else files
-    inv = load_latest_inventory(cfg) or {}
-    summary = {"scan_time": inv.get("scan_time", ""), "profile": inv.get("profile", ""),
-               "live_hosts": len(inv.get("hosts", [])),
-               "open_ports": sum(len(h.get("ports", [])) for h in inv.get("hosts", [])),
-               "total_ips": "", "networks": ""}
+    summary = build_summary(cfg, load_latest_inventory(cfg) or {})
     try:
         send_reports(cfg, attachments, summary)
         notify_event(cfg, "report_sent", {"recipients": cfg.get("email.recipients", []),
@@ -235,6 +231,7 @@ def act_view_last(cfg):
 
 
 def act_statistics(cfg):
+    """Shared stats printer; pauses only when interactive=True."""
     inv = load_latest_inventory(cfg)
     if not inv:
         print("No scan data."); return _pause()
@@ -261,7 +258,6 @@ OS Distribution:""")
     print("\nTop Services:")
     for svc, n in st["top_services"][:8]:
         print(f"  {svc:<14}: {n} hosts")
-    _pause()
 
 
 def _net_size(cidr):
@@ -300,9 +296,10 @@ Configuration
  8. Report Settings (formats, branding, classification)
  9. Retention Settings
 10. Restore Default Scan Settings
-11. Export Config (backup copy)
-12. Import Config (restore from backup)
-13. Verbose Debug Mode (log nmap commands, stdout/stderr, parser counters)
+11. Backup Manager (save / list / restore config backups)
+12. Export Config Wizard (portable bundle incl. backups)
+13. Import Config Wizard (restore from bundle or file)
+14. Verbose Debug Mode (log nmap commands, stdout/stderr, parser counters)
  0. Back""")
         c = input("> ").strip()
         if c == "0":
@@ -334,19 +331,25 @@ Configuration
         elif c == "8":
             cfg_reporting(cfg)
         elif c == "9":
-            rd = input("Report retention days [90]: ") or "90"
-            sd = input("Scan retention days [90]: ") or "90"
-            mk = input("Keep monthly archives [12]: ") or "12"
-            cfg.set("retention.report_days", int(rd))
-            cfg.set("retention.scan_days", int(sd))
-            cfg.set("retention.monthly_keep", int(mk))
-            cfg.save()
+            cfg_retention_wizard(cfg)
         elif c == "10":
             if input("Restore factory DEFAULT SCAN settings? [y/N]: ").lower() == "y":
                 cfg.backup()
                 cfg.restore_scan_defaults()
                 print("Scan/profile/performance settings restored to defaults.")
+        elif c == "11":
+            menu_backup_manager(cfg)
+        elif c == "12":
+            print("Export bundle written:", export_config_bundle(cfg))
         elif c == "13":
+            imp = input("Path to bundle (.zip) or config yaml: ").strip()
+            if imp:
+                try:
+                    import_config_bundle(cfg, Path(imp))
+                    print("Config imported and validated; previous live config auto-backed up.")
+                except Exception as exc:
+                    print(f"Import failed: {exc}")
+        elif c == "14":
             cur = bool(cfg.get("logging.verbose_debug", False))
             ans = input(f"Enable verbose debug mode? current={'ON' if cur else 'OFF'} [y/N]: ").strip().lower()
             cfg.set("logging.verbose_debug", ans == "y")
@@ -355,17 +358,6 @@ Configuration
                   " counters will be written to logs/scanner.log"
                   if ans == "y" else "OFF")
             print("Note: takes effect on next program start.")
-        elif c == "11":
-            print("Backup written:", cfg.backup())
-        elif c == "12":
-            bdir = cfg.root / "backups"
-            files = sorted(bdir.glob("config_*.yaml")) if bdir.exists() else []
-            for i, f in enumerate(files, 1):
-                print(f"  {i}. {f.name}")
-            sel = input("Number to restore (0 cancel): ").strip()
-            if sel.isdigit() and 1 <= int(sel) <= len(files):
-                cfg.restore_from(files[int(sel) - 1])
-                print("Config restored (previous version auto-backed up).")
 
 
 def _edit_list(items, prompt_key, add_prompt):
@@ -498,6 +490,7 @@ def cfg_performance(cfg):
 
 
 def cfg_reporting(cfg):
+    print("\nReport Settings (Enter keeps current value)")
     org = input(f"Organization name [{cfg.get('reporting.organization_name', '')}]: ").strip()
     if org:
         cfg.set("reporting.organization_name", org)
@@ -507,10 +500,123 @@ def cfg_reporting(cfg):
     fmts = input("Formats (comma: html,csv,pdf,json) [html,csv,pdf,json]: ").strip()
     if fmts:
         cfg.set("reporting.formats", [f.strip() for f in fmts.split(",")])
+    cur_z = "Y/n" if cfg.get("reporting.package_zip", True) else "y/N"
     cfg.set("reporting.package_zip",
-            input("ZIP bundle for email? [Y/n]: ").strip().lower() != "n")
+            input(f"ZIP bundle for email? [{cur_z}]: ").strip().lower() != "n")
+    hist = input("Email subject for historical re-sends shows '(Historical <date>)'. "
+                 "Enable historical report emailing? [Y/n]: ").strip().lower() != "n"
+    cfg.set("email.historical_enabled", hist)
     cfg.save()
     print("Report settings saved.")
+
+
+def cfg_retention_wizard(cfg):
+    """Retention Configuration Wizard (menu 9 inside Configure)."""
+    def ask_num(key, label, default):
+        cur = cfg.get(f"retention.{key}", default)
+        v = input(f"{label} [{cur}]: ").strip()
+        if v:
+            try:
+                cfg.set(f"retention.{key}", int(v))
+            except ValueError:
+                print(f"  (ignored '{v}' - must be a number)")
+    print("\nRetention Configuration Wizard\n"
+          "(Enter keeps the current value; values apply on next cleanup run)")
+    ask_num("report_days", "Report retention days", 90)
+    ask_num("scan_days", "Scan data retention days", 90)
+    ask_num("monthly_keep", "Keep monthly archives (count)", 12)
+    ask_num("config_backups", "Config backups to keep (repo + /tmp emergency)", 20)
+    lg = input("Log max size MB [5]: ").strip() or "5"
+    try:
+        cfg.set("logging.max_bytes", int(float(lg) * 1_048_576))
+    except ValueError:
+        pass
+    lc = input("Log backup file count [5]: ").strip()
+    if lc:
+        try:
+            cfg.set("logging.backup_count", int(lc))
+        except ValueError:
+            pass
+    cfg.save()
+    print("Retention policy saved. Run Maintenance -> Cleanup to apply now.")
+
+
+# ------------------------------------------------------- backup manager / wizards
+def menu_backup_manager(cfg):
+    """Save / list / restore configuration backups.
+    Every save goes to <repo>/backups AND an emergency copy in /tmp/InfraScanner.
+    The last 20 backups are retained automatically."""
+    while True:
+        backups = cfg.list_backups()
+        print(f"\nConfiguration Backup Manager   (keep last "
+              f"{cfg.get('retention.config_backups', 20)}, emergency dir: "
+              f"{cfg.EMERGENCY_BACKUP_DIR})")
+        for i, b in enumerate(backups[:20], 1):
+            print(f"  {i:>2}. {b.name:<38} {b.stat().st_size // 1024} KB")
+        if not backups:
+            print("  (no backups yet)")
+        c = input("s=save new backup / <num>=restore / 0=back: ").strip().lower()
+        if c in ("", "0"):
+            return _pause()
+        if c == "s":
+            dest = cfg.backup()
+            print("Backup saved:", dest)
+            print("Emergency copy:", cfg.EMERGENCY_BACKUP_DIR / "backups" / dest.name)
+        elif c.isdigit() and 1 <= int(c) <= len(backups):
+            if input(f"Restore {backups[int(c)-1].name}? Current config will be "
+                     f"auto-backed up first. [y/N]: ").lower() == "y":
+                cfg.restore_from(backups[int(c) - 1])
+                print("Config restored.")
+
+
+def export_config_bundle(cfg) -> Path:
+    """Wizard: portable ZIP with config.yaml + defaults + recent backups."""
+    import zipfile as _zf
+    out_dir = cfg.root / "backups"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    bundle = out_dir / f"infrascan_config_bundle_{stamp}.zip"
+    with _zf.ZipFile(bundle, "w", _zf.ZIP_DEFLATED) as zf:
+        zf.write(cfg.path, "config/config.yaml")
+        from .config_manager import DEFAULTS_FILE
+        if DEFAULTS_FILE.exists():
+            zf.write(DEFAULTS_FILE, "config/config.defaults.yaml")
+        for b in cfg.list_backups()[:20]:
+            zf.write(b, f"backups/{b.name}")
+    log.info("Config bundle exported: %s", bundle)
+    return bundle
+
+
+def import_config_bundle(cfg, src: Path) -> None:
+    """Wizard: import a bundle ZIP (or plain config yaml) with validation."""
+    import zipfile as _zf
+    src = Path(src)
+    if not src.exists():
+        raise ConfigError(f"File not found: {src}")
+    tmp_target = None
+    if src.suffix.lower() == ".zip":
+        extract = cfg.root / "backups" / "_import_tmp"
+        extract.mkdir(parents=True, exist_ok=True)
+        with _zf.ZipFile(src) as zf:
+            if "config/config.yaml" not in zf.namelist():
+                raise ConfigError("Bundle does not contain config/config.yaml")
+            zf.extract("config/config.yaml", extract)
+            for name in zf.namelist():
+                if name.startswith("backups/") and name.endswith(".yaml"):
+                    zf.extract(name, extract)
+        tmp_target = extract / "config" / "config.yaml"
+    elif src.suffix.lower() in (".yaml", ".yml"):
+        tmp_target = src
+    else:
+        raise ConfigError("Unsupported file type (use .zip bundle or .yaml)")
+    # validate parseability BEFORE touching the live config (rollback protection)
+    import yaml as _yaml
+    with open(tmp_target, encoding="utf-8") as fh:
+        data = _yaml.safe_load(fh) or {}
+    if not data.get("networks"):
+        raise ConfigError("Imported config has no networks - refusing to import")
+    cfg.restore_from(tmp_target)
+    log.info("Config imported from %s", src)
 
 
 # ---------------------------------------------------------------- schedule
@@ -611,6 +717,124 @@ All parameters live in config/config.yaml.""")
     _pause()
 
 
+# ---------------------------------------------------------------- diagnostics
+def act_diagnostics(cfg):
+    """Show recently executed nmap commands and the last log entries."""
+    import json as _json
+    from .config_manager import ROOT
+    print("\nDiagnostics")
+    # 1. executed nmap commands
+    lcp = cfg.dir("logs_dir") / "last_commands.log"
+    if not lcp.exists():
+        lcp = ROOT / "logs" / "last_commands.log"
+    print("\n--- Executed Nmap commands (latest first) ---------------")
+    if lcp.exists():
+        lines = lcp.read_text(errors="replace").splitlines()[-20:]
+        for line in reversed(lines):
+            try:
+                rec = _json.loads(line)
+                rc = rec.get("rc")
+                mark = "\u2714" if rc == 0 else f"\u2716 rc={rc}"
+                print(f"[{rec.get('time','')}] {mark} ({rec.get('duration_sec',0)}s)")
+                print(f"    {rec.get('cmd','')}")
+                if rec.get("stderr_tail"):
+                    print(f"    stderr: {rec['stderr_tail'][:200]}")
+            except ValueError:
+                print("   ", line)
+    else:
+        print("  (no commands recorded yet - logs/last_commands.log missing)")
+    # 2. last 100 scanner log entries
+    sl = cfg.dir("logs_dir") / "scanner.log"
+    if not sl.exists():
+        sl = ROOT / "logs" / "scanner.log"
+    print("\n--- Last 100 scanner.log entries --------------------------")
+    if sl.exists():
+        for ln in sl.read_text(errors="replace").splitlines()[-100:]:
+            print(ln)
+    else:
+        print("  (scanner.log not found)")
+    # 3. current environment summary
+    print("\n--- Environment -------------------------------------------")
+    for comp, status, detail in health_check(cfg):
+        print(f"  [{status:<4}] {comp:<15} {detail}")
+    _pause()
+
+
+# ---------------------------------------------------------------- history / browser
+def act_send_historical(cfg):
+    """Menu 17: pick a past scan date and email its reports (ZIP attached)."""
+    from .reporter import list_report_history, load_inventory_for_date
+    hist = [h for h in list_report_history(cfg) if h["files"]]
+    if not hist:
+        print("No historical reports found."); return _pause()
+    print("\nHistorical Reports")
+    for i, h in enumerate(hist[:30], 1):
+        names = ", ".join(sorted({f.suffix.lstrip(".") for f in h["files"]}))
+        print(f"  {i:>2}. {h['date']}  ({names})  scan_time={h['scan_time'] or 'n/a'}")
+    sel = input("Number to email (0 cancel): ").strip()
+    if not sel.isdigit() or not (1 <= int(sel) <= min(30, len(hist))):
+        return _pause()
+    entry = hist[int(sel) - 1]
+    files = [f for f in entry["files"] if f.suffix.lower() != ".zip"]
+    inv = load_inventory_for_date(cfg, entry["date"]) or {}
+    summary = {"scan_time": inv.get("scan_time", entry["date"]),
+               "profile": inv.get("profile", ""),
+               "live_hosts": len(inv.get("hosts", [])),
+               "open_ports": sum(len(h.get("ports", [])) for h in inv.get("hosts", [])),
+               "networks": "", "total_ips": ""}
+    zp = package_zip(cfg, files, date_override=entry["date"])
+    attachments = [zp] if zp else files
+    try:
+        send_reports(cfg, attachments, summary,
+                     subject_suffix=f"Historical {entry['date']}")
+        notify_event(cfg, "report_sent", {
+            "recipients": cfg.get("email.recipients", []),
+            "attachments": len(attachments)})
+        print(f"Historical report {entry['date']} emailed successfully.")
+    except EmailError as exc:
+        print(f"Email failed: {exc}")
+    _pause()
+
+
+def act_report_browser(cfg):
+    """Menu 18: browse all generated reports; open one locally."""
+    from .reporter import list_report_history
+    hist = [h for h in list_report_history(cfg) if h["files"]]
+    if not hist:
+        print("No reports yet. Run a scan first."); return _pause()
+    while True:
+        print("\nReport Browser")
+        idx_map = []
+        n = 0
+        for h in hist[:15]:
+            print(f"  [{h['date']}]")
+            for f in sorted(h["files"]):
+                n += 1
+                idx_map.append((n, f))
+                kb = f.stat().st_size // 1024
+                print(f"    {n:>2}. {f.name:<48} {kb} KB")
+        c = input("Open number (Enter back, s=serve dir, q=quit): ").strip().lower()
+        if c == "q":
+            return
+        if not c:
+            return _pause()
+        if c == "s":
+            d = cfg.dir("reports_dir") / "latest"
+            print(f"Serving {d} on http://<this-host>:8088  (Ctrl+C to stop)")
+            subprocess.run([sys.executable, "-m", "http.server", "8088",
+                            "--directory", str(d)])
+            continue
+        if c.isdigit() and 1 <= int(c) <= len(idx_map):
+            p = idx_map[int(c) - 1][1]
+            browser = os.environ.get("BROWSER")
+            if browser:
+                subprocess.Popen([browser, str(p)])
+                print(f"Opened {p}")
+            else:
+                print(f"File: {p}\n(set $BROWSER to auto-open, or download/view manually)")
+            _pause()
+
+
 # ---------------------------------------------------------------- main menu
 MENU_ITEMS = [
     ("1", "Full Infrastructure Scan", act_full_scan),
@@ -620,7 +844,7 @@ MENU_ITEMS = [
     ("5", "Generate Reports (no scan)", act_generate_reports),
     ("6", "Send Latest Reports", act_send_reports),
     ("7", "View Last Report", act_view_last),
-    ("8", "View Scan Statistics", act_statistics),
+    ("8", "View Scan Statistics", lambda cfg: (act_statistics(cfg), _pause())),
     ("9", "View Change Report", act_change_report),
     ("10", "Configure", None),
     ("11", "Install / Verify Requirements", act_install),
@@ -629,15 +853,54 @@ MENU_ITEMS = [
     ("14", "Test Teams Webhook", lambda cfg: (print("OK - card posted") if teams_test(cfg) else print("Failed (check URL/logs)"), _pause())),
     ("15", "Health Check", act_health),
     ("16", "Maintenance", act_maintenance),
-    ("17", "About", act_about),
+    ("17", "Send Historical Reports", act_send_historical),
+    ("18", "Report Browser", act_report_browser),
+    ("19", "Diagnostics", act_diagnostics),
+    ("20", "About", act_about),
 ]
+
+STATUS_ICONS = {"OK": "\u2714", "WARN": "\u26a0", "FAIL": "\u2716"}
+
+
+def _env_summary_lines(cfg):
+    """Compact one-line-per-item environment strip shown inside the menu."""
+    nets = cfg.get("networks", []) or []
+    prof = cfg.get("scan.profile", "standard")
+    recips = cfg.get("email.recipients", []) or []
+    smtp = cfg.get("email.smtp_server", "") or "not set"
+    teams_on = bool(cfg.get("teams.enabled", False)) and \
+        "example.com" not in (cfg.get("teams.webhook_url", "") or "")
+    inv = load_latest_inventory(cfg)
+    last = inv.get("scan_time", "never") if inv else "never"
+    live = len(inv.get("hosts", [])) if inv else 0
+    ck = load_checkpoint(cfg)
+    resume = f"  [RESUMABLE SCAN: {len(ck.get('hosts', []))} done]" if ck else ""
+    priv = "root" if is_root() else "non-root (SYN/OS degraded)"
+    return [
+        f" Networks : {len(nets)} ({', '.join(n['name'] for n in nets[:4])}{'...' if len(nets) > 4 else ''})",
+        f" Profile  : {prof}          Privileges : {priv}",
+        f" SMTP     : {smtp}  Recipients: {len(recips)}  Teams: {'ON' if teams_on else 'OFF'}",
+        f" Last scan: {last}  ({live} live hosts){resume}",
+    ]
 
 
 def interactive(cfg):
     while True:
         banner()
-        for key, label, _fn in MENU_ITEMS:
-            print(f"  {key:>2}. {label}")
+        print("-" * 60)
+        for ln in _env_summary_lines(cfg):
+            print(ln)
+        print("-" * 60)
+        items = list(MENU_ITEMS)
+        half = (len(items) + 1) // 2
+        left, right = items[:half], items[half:]
+        for i in range(half):
+            k1, l1 = left[i][0], left[i][1]
+            if i < len(right):
+                k2, l2 = right[i][0], right[i][1]
+                print(f"  {k1:>2}. {l1:<28} {k2:>2}. {l2}")
+            else:
+                print(f"  {k1:>2}. {l1}")
         print("   0. Exit")
         print("=" * 60)
         c = input("Choice: ").strip()
@@ -652,6 +915,8 @@ def interactive(cfg):
                 fn = dict((k, f) for k, l, f in MENU_ITEMS)[c]
                 if fn:
                     fn(cfg)
+        except KeyError:
+            print("Invalid choice.")
         except (ScanError, EmailError, ConfigError) as exc:
             log.error("Action %s failed: %s", c, exc)
             notify_event(cfg, "error", {"phase": f"menu-{c}", "reason": str(exc),
@@ -685,6 +950,8 @@ def build_parser():
     sub.add_parser("health")
     sub.add_parser("stats")
     sub.add_parser("cleanup")
+    sub.add_parser("diagnostics")
+    sub.add_parser("history")
     sub.add_parser("about")
     return ap
 
@@ -747,6 +1014,12 @@ def cli_main(argv=None):
             act_statistics_nopause(cfg)
         elif cmd == "cleanup":
             print(cleanup(cfg))
+        elif cmd == "diagnostics":
+            act_diagnostics(cfg)
+        elif cmd == "history":
+            from .reporter import list_report_history
+            for h in list_report_history(cfg):
+                print(h["date"], h["scan_time"], [f.name for f in h["files"]])
         elif cmd == "about":
             act_about(cfg)
     except (ScanError, EmailError) as exc:

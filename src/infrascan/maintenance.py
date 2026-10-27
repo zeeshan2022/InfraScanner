@@ -73,8 +73,28 @@ def cleanup(cfg, dry_run: bool = False) -> dict:
                         p.unlink(missing_ok=True)
                     removed.append(f)
 
+    # config backups: keep last N (default 20) in backups/ + /tmp emergency dir
+    keep_backups = int(cfg.get("retention.config_backups", 20))
+    removed += _cleanup_backups(cfg.root / "backups", keep_backups, dry_run)
+    removed += _cleanup_backups(Path("/tmp/InfraScanner/backups"),
+                                keep_backups, dry_run)
+
     log.info("Cleanup %s %d files", "(dry-run)" if dry_run else "removed", len(removed))
     return {"removed": len(removed), "files": removed[:50], "dry_run": dry_run}
+
+
+def _cleanup_backups(bdir: Path, keep: int, dry_run: bool) -> list[str]:
+    """Keep only the newest `keep` config backup files in a directory."""
+    gone = []
+    if not bdir.exists():
+        return gone
+    files = sorted(bdir.glob("config_*.yaml"),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in files[keep:]:
+        if not dry_run:
+            old.unlink(missing_ok=True)
+        gone.append(str(old))
+    return gone
 
 
 # ------------------------------------------------------------------ health
