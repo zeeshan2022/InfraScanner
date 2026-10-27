@@ -73,10 +73,10 @@ def cleanup(cfg, dry_run: bool = False) -> dict:
                         p.unlink(missing_ok=True)
                     removed.append(f)
 
-    # config backups: keep last N (default 20) in backups/ + /tmp emergency dir
+    # config backups: keep last N per location: backups/ + /opt/InfraScanner-bkp
     keep_backups = int(cfg.get("retention.config_backups", 20))
     removed += _cleanup_backups(cfg.root / "backups", keep_backups, dry_run)
-    removed += _cleanup_backups(Path("/tmp/InfraScanner/backups"),
+    removed += _cleanup_backups(cfg.SECONDARY_BACKUP_DIR,
                                 keep_backups, dry_run)
 
     log.info("Cleanup %s %d files", "(dry-run)" if dry_run else "removed", len(removed))

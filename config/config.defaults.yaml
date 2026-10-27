@@ -10,6 +10,11 @@ project:
   scanner_name: "InfraScanner"
   timezone: "Asia/Dubai"
 
+scanner:
+  version: "1.0.1"
+  config_version: "1.0.1"
+
+
 reporting:
   organization_name: "My Company"
   report_author: "InfraScanner"

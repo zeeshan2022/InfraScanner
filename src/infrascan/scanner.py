@@ -105,6 +105,21 @@ def validate_nmap_cmd(cmd: list[str]) -> None:
     m = _re.search(r"--max-retries (\S+)", joined)
     if m and not m.group(1).isdigit():
         raise ScanError(f"invalid --max-retries value: {m.group(1)}")
+    # Nmap Error #485 class: -PS/-PA/-PU probes must carry a port list.
+    # Bare flags like "-PA,PU,PE" or "-PA" are illegal with -sn and abort
+    # the sweep instantly. Validate every TCP/UDP probe token pre-execution.
+    for tok in out:
+        m = _re.match(r"^-(?:PS|PA|PU)(.*)$", tok)
+        if m is not None:
+            spec = m.group(1)
+            # bare "-PA" / empty spec, or chained probes like "-PA,PU,PE"
+            # (spec starts with a comma) are both illegal in nmap 7.92.
+            if not spec or spec.startswith(",") or not _re.fullmatch(
+                    r"[0-9A-Za-z:.\-]+(?:,[0-9A-Za-z:.\-]+)*", spec):
+                raise ScanError(
+                    f"malformed nmap probe argument '{tok}': "
+                    "-PS/-PA/-PU require a valid port list "
+                    "(e.g. -PA80,443). Aborting before execution.")
     cmd[:] = out
 
 
@@ -237,14 +252,19 @@ def discover_network(cfg, subnet: str) -> list[str]:
     raw = cfg.dir("scans_dir") / "raw"
     raw.mkdir(parents=True, exist_ok=True)
     base = raw / f"discovery_{subnet.replace('/', '_')}_{stamp()}"
-    cmd = ["nmap", "-sn", "-PS21-25,53,80,110,135,139,143,443,445,3389",
-           "-PA,PU,PE", "--open",
+    # Valid Nmap 7.92 probe syntax: every -PS/-PA/-PU flag needs its own
+    # port list; bare "-PA,PU,PE" is illegal (Error #485). TCP-ACK uses -PE
+    # (echo probe); ICMP echo (-PE) is included by default with -sn.
+    cmd = ["nmap", "-sn",
+           "-PS21-25,53,80,110,135,139,143,443,445,3389",
+           "-PA80,443", "-PU53,137,161", "--open",
            "-v", "-oX", f"{base}.xml", "-oG", f"{base}.gnmap", subnet]
     par = str(cfg.get("performance.discovery_parallelism", "300"))
     cmd += ["-T4", "--max-parallelism", par]
     hto = str(cfg.get("performance.host_timeout", "15m")).rstrip("m")
     cmd += ["--host-timeout", f"{hto}s"] if hto.isdigit() else \
            ["--host-timeout", str(cfg.get("performance.host_timeout", "15m"))]
+    validate_nmap_cmd(cmd)
     log.info("Discovery %s ...", subnet)
     global _CFG_REF
     _CFG_REF = cfg
@@ -684,3 +704,36 @@ def _whoami() -> str:
         return getpass.getuser()
     except Exception:
         return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Version tracking: code version vs config_version stored in config.yaml
+# ---------------------------------------------------------------------------
+
+def check_config_version(cfg) -> None:
+    """Compare the running code version against scanner.config_version in
+    config.yaml at startup. Warns (and offers to stamp) when a user is
+    running a newer build with an older shipped configuration."""
+    from . import __version__, CONFIG_VERSION
+    cfg_ver = str(cfg.get("scanner.config_version", "") or "")
+    code_ver = __version__
+    if not cfg_ver:
+        # legacy config without the section - stamp it silently on first run
+        cfg.set("scanner.version", code_ver)
+        cfg.set("scanner.config_version", CONFIG_VERSION)
+        cfg.save()
+        return
+    if cfg_ver != code_ver:
+        print(f"\n  Code Version   : {code_ver}")
+        print(f"  Config Version : {cfg_ver}")
+        print("  WARNING:\n  Configuration upgrade recommended.")
+        try:
+            ans = input("  Update config version stamp now? [Y/n]: ").strip().lower()
+        except EOFError:
+            ans = "y"
+        if ans != "n":
+            cfg.backup()
+            cfg.set("scanner.version", code_ver)
+            cfg.set("scanner.config_version", CONFIG_VERSION)
+            cfg.save()
+            print("  Config version stamped and previous config backed up.")

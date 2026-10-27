@@ -1,0 +1,286 @@
+{
+  "meta": {
+    "scan_time": "2026-10-27T10:00:00",
+    "duration": "00h 43m 18s",
+    "profile": "standard",
+    "org": "My Company",
+    "author": "InfraScanner",
+    "classification": "Internal",
+    "product": "InfraScanner v",
+    "vendor": "ZXSPRD.COM",
+    "generated": "2026-10-27 08:17:03"
+  },
+  "statistics": {
+    "hosts": 3,
+    "open_ports": 6,
+    "top_ports": [
+      [
+        3389,
+        2
+      ],
+      [
+        445,
+        1
+      ],
+      [
+        443,
+        1
+      ],
+      [
+        1433,
+        1
+      ],
+      [
+        23,
+        1
+      ]
+    ],
+    "top_services": [
+      [
+        "ms-wbt-server",
+        2
+      ],
+      [
+        "microsoft-ds",
+        1
+      ],
+      [
+        "https",
+        1
+      ],
+      [
+        "ms-sql-s",
+        1
+      ],
+      [
+        "telnet",
+        1
+      ]
+    ],
+    "vlan_distribution": [
+      [
+        "DMZ",
+        2
+      ],
+      [
+        "MGMT",
+        1
+      ]
+    ],
+    "os_distribution": [
+      [
+        "Windows",
+        1
+      ],
+      [
+        "Linux",
+        1
+      ],
+      [
+        "Unknown",
+        1
+      ]
+    ]
+  },
+  "findings": [
+    {
+      "severity": "CRITICAL",
+      "category": "RDP exposed in DMZ",
+      "host": "192.168.1.20",
+      "detail": "TCP 3389 open on DMZ segment"
+    },
+    {
+      "severity": "CRITICAL",
+      "category": "Database exposed in DMZ",
+      "host": "192.168.1.20",
+      "detail": "MSSQL on port 1433"
+    },
+    {
+      "severity": "HIGH",
+      "category": "SMBv1 detected",
+      "host": "192.168.4.10",
+      "detail": "Legacy SMB protocol enabled"
+    },
+    {
+      "severity": "HIGH",
+      "category": "Insecure protocol: Telnet",
+      "host": "192.168.1.55",
+      "detail": "TCP 23 open"
+    },
+    {
+      "severity": "MEDIUM",
+      "category": "RDP exposed",
+      "host": "192.168.4.10",
+      "detail": "TCP 3389 open"
+    },
+    {
+      "severity": "MEDIUM",
+      "category": "Expired SSL certificate",
+      "host": "192.168.4.10",
+      "detail": "Cert for CN=DC01 expired"
+    },
+    {
+      "severity": "LOW",
+      "category": "HTTP/HTTPS service",
+      "host": "192.168.1.20",
+      "detail": "443"
+    },
+    {
+      "severity": "INFO",
+      "category": "Unknown device",
+      "host": "192.168.1.55",
+      "detail": "No hostname or OS identified"
+    }
+  ],
+  "hosts": [
+    {
+      "ip": "192.168.4.10",
+      "vlan": "MGMT",
+      "hostname": "DC01",
+      "status": "up",
+      "os_guess": "Windows Server 2022",
+      "mac": "",
+      "ports": [
+        {
+          "port": 445,
+          "protocol": "tcp",
+          "state": "open",
+          "service": "microsoft-ds",
+          "product": "",
+          "version": "",
+          "extrainfo": "",
+          "tunnel": ""
+        },
+        {
+          "port": 3389,
+          "protocol": "tcp",
+          "state": "open",
+          "service": "ms-wbt-server",
+          "product": "",
+          "version": "",
+          "extrainfo": "",
+          "tunnel": ""
+        }
+      ],
+      "scripts": {
+        "ssl-cert": "| Subject: CN=DC01\n| Issuer: CN=DC01\n| Not After:251010000000Z",
+        "smb-os-discovery": "protocol: NT1 SMBv1"
+      },
+      "scanned_at": "x",
+      "enumeration": {
+        "http": [],
+        "ssl": [
+          {
+            "subject": "CN=DC01",
+            "issuer": "CN=DC01",
+            "not_after": "251010000000Z",
+            "expired": true,
+            "self_signed": true,
+            "tls_version": ""
+          }
+        ],
+        "smb": {
+          "detected": true,
+          "smbv1": true,
+          "signing": null,
+          "raw": "protocol: NT1 SMBv1"
+        },
+        "databases": []
+      }
+    },
+    {
+      "ip": "192.168.1.20",
+      "vlan": "DMZ",
+      "hostname": "web01",
+      "status": "up",
+      "os_guess": "Linux 5.x",
+      "mac": "",
+      "ports": [
+        {
+          "port": 443,
+          "protocol": "tcp",
+          "state": "open",
+          "service": "https",
+          "product": "nginx",
+          "version": "1.24.0",
+          "extrainfo": "",
+          "tunnel": "ssl"
+        },
+        {
+          "port": 1433,
+          "protocol": "tcp",
+          "state": "open",
+          "service": "ms-sql-s",
+          "product": "",
+          "version": "",
+          "extrainfo": "",
+          "tunnel": ""
+        },
+        {
+          "port": 3389,
+          "protocol": "tcp",
+          "state": "open",
+          "service": "ms-wbt-server",
+          "product": "",
+          "version": "",
+          "extrainfo": "",
+          "tunnel": ""
+        }
+      ],
+      "scripts": {
+        "http-title": "Site title: Company Portal"
+      },
+      "scanned_at": "x",
+      "enumeration": {
+        "http": [
+          {
+            "port": 443,
+            "service": "https",
+            "product": "nginx",
+            "version": "1.24.0",
+            "tunnel": "ssl",
+            "title": "Company Portal"
+          }
+        ],
+        "ssl": [],
+        "smb": {},
+        "databases": [
+          {
+            "port": 1433,
+            "name": "MSSQL",
+            "product": "",
+            "version": ""
+          }
+        ]
+      }
+    },
+    {
+      "ip": "192.168.1.55",
+      "vlan": "DMZ",
+      "hostname": "",
+      "status": "up",
+      "os_guess": "Unknown",
+      "mac": "",
+      "ports": [
+        {
+          "port": 23,
+          "protocol": "tcp",
+          "state": "open",
+          "service": "telnet",
+          "product": "",
+          "version": "",
+          "extrainfo": "",
+          "tunnel": ""
+        }
+      ],
+      "scripts": {},
+      "scanned_at": "x",
+      "enumeration": {
+        "http": [],
+        "ssl": [],
+        "smb": {},
+        "databases": []
+      }
+    }
+  ]
+}
