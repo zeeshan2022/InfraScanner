@@ -1,0 +1,141 @@
+# =============================================================================
+# InfraScanner - Master Configuration (single source of truth)
+# Copyright (c) ZXSPRD.COM - Licensed under GNU GPL v3
+# All runtime behaviour is controlled from this file. No code changes needed.
+# =============================================================================
+
+project:
+  organization: "ZXSPRD.COM"
+  environment: "Production"
+  scanner_name: "InfraScanner"
+  timezone: "Asia/Dubai"
+
+reporting:
+  organization_name: "My Company"
+  report_author: "InfraScanner"
+  classification: "Internal"
+  formats: [html, csv, pdf, json]      # generated every run
+  package_zip: true                     # bundle all reports into one ZIP for email
+  executive_pdf: true                   # separate 1-2 page Executive_Report.pdf
+  technical_pdf: true                   # full Technical_Report.pdf
+  change_report: true                   # diff vs previous scan -> change_report.html
+
+networks:
+  # Two example VLANs - edit via menu 10 (Configure) or directly here
+  - name: MGMT
+    subnet: 192.168.4.0/24
+  - name: DMZ
+    subnet: 192.168.1.0/24
+
+exclude:                                # never scanned hosts
+  hosts: []
+    # - 192.168.4.1
+    # - 192.168.4.254
+  subnets: []
+    # - 192.168.99.0/24
+
+scan:
+  profile: standard                     # quick | standard | deep | extreme
+  maintenance_window:                   # deep/extreme scans blocked outside window
+    enabled: false                      # set true to enforce
+    start: "22:00"
+    end: "06:00"
+  resume_enabled: true                  # checkpoint state for Resume Scan (menu 4)
+
+scan_profiles:
+  quick:
+    top_ports: 100
+    full_ports: false
+    udp_top100: false
+    os_detection: false
+    version_detection: true
+    nse_default: false
+    timing: "aggressive"                # paranoid sneaky polite normal aggressive insane
+  standard:                             # DEFAULT
+    top_ports: 1000
+    full_ports: false
+    udp_top100: false
+    os_detection: true
+    version_detection: true
+    nse_default: true
+    timing: "normal"
+  deep:
+    top_ports: 1000
+    full_ports: true                    # -p1-65535
+    udp_top100: false
+    os_detection: true
+    version_detection: true
+    nse_default: true
+    timing: "normal"
+  extreme:
+    top_ports: 1000
+    full_ports: true
+    udp_top100: true
+    os_detection: true
+    version_detection: true
+    nse_default: true
+    version_intensity: 9
+    timing: "aggressive"
+
+performance:
+  max_parallel_hosts: 8                 # concurrent host scans
+  packet_rate: ""                       # nmap --max-rate (empty = default)
+  host_timeout: "15m"
+  script_timeout: "60s"
+  retries: 1
+  min_rtt_timeout: "200ms"
+  discovery_parallelism: "300"          # ping sweep parallelism
+
+email:
+  enabled: true
+  smtp_server: "smtp.example.com"
+  smtp_port: 587
+  use_tls: true                         # STARTTLS
+  username: "scanner@example.com"
+  password: "CHANGE_ME"
+  sender: "InfraScanner <scanner@example.com>"
+  recipients:
+    - "abc@def.com"
+  subject_prefix: "[Infrastructure Scan]"
+  alert_subject_prefix: "[ALERT]"
+  critical_severity_alert: true         # switch subject when CRITICAL findings exist
+
+teams:
+  enabled: true
+  webhook_url: "https://teams.webhook.example.com/hook"
+  events: [scan_started, scan_completed, report_sent, error, changes_detected]
+
+notifications:                          # future engines (v1.1) - stubs only in v1.0
+  slack:
+    enabled: false
+    webhook_url: ""
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""
+
+severity_rules:                         # finding -> severity mapping (tunable)
+  rdp_in_dmz: CRITICAL
+  exposed_database_in_dmz: CRITICAL
+  smbv1: HIGH
+  open_database: HIGH
+  expired_ssl: MEDIUM
+  ssl_self_signed: MEDIUM
+  http_exposed: LOW
+  unknown_device: INFO
+
+retention:
+  scan_days: 90                         # raw scan data kept 90 days
+  report_days: 90                       # daily reports kept 90 days
+  monthly_keep: 12                      # last 12 monthly archives
+
+logging:
+  level: INFO                           # DEBUG INFO WARNING ERROR
+  max_bytes: 5242880                    # 5 MB per log file
+  backup_count: 5
+
+paths:                                  # relative to project root by default
+  scans_dir: "scans"
+  reports_dir: "reports"
+  logs_dir: "logs"
+  temp_dir: "temp"

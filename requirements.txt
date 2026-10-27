@@ -1,0 +1,5 @@
+# InfraScanner runtime dependencies - Copyright (c) ZXSPRD.COM - GPL v3
+PyYAML>=6.0        # config parsing (single config.yaml source of truth)
+fpdf2>=2.7         # pure-python PDF engine (Executive + Technical reports)
+# Optional dev/test:
+pytest>=7.0
